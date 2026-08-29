@@ -1,0 +1,102 @@
+{
+  "course": "CS 4820 - AI Agents",
+  "term": "Fall 2026",
+
+  "_comment": "This is the gradebook. The LLM has NEVER seen this file. It can only reach it through an MCP tool call. That is the entire point of the tools demo. The data has deliberate patterns in it -- one student declining, one improving, one erratic, one quietly failing -- so the interesting question is never 'what is the number' but 'what does the number mean', which is the part the LLM is actually for.",
+
+  "assignments": [
+    "HW1 - Prompting Basics",
+    "HW2 - Tool Use & Function Calling",
+    "HW3 - Retrieval & Embeddings",
+    "Midterm Project - Build an Agent"
+  ],
+
+  "students": {
+    "Sam Rivera": {
+      "grades": {
+        "HW1 - Prompting Basics": 94,
+        "HW2 - Tool Use & Function Calling": 85,
+        "HW3 - Retrieval & Embeddings": 71,
+        "Midterm Project - Build an Agent": 62
+      },
+      "attendance_pct": 78,
+      "late_submissions": 2
+    },
+    "Alex Chen": {
+      "grades": {
+        "HW1 - Prompting Basics": 88,
+        "HW2 - Tool Use & Function Calling": 91,
+        "HW3 - Retrieval & Embeddings": 84,
+        "Midterm Project - Build an Agent": 89
+      },
+      "attendance_pct": 96,
+      "late_submissions": 0
+    },
+    "Jordan Patel": {
+      "grades": {
+        "HW1 - Prompting Basics": 68,
+        "HW2 - Tool Use & Function Calling": 74,
+        "HW3 - Retrieval & Embeddings": 83,
+        "Midterm Project - Build an Agent": 91
+      },
+      "attendance_pct": 92,
+      "late_submissions": 1
+    },
+    "Priya Shah": {
+      "grades": {
+        "HW1 - Prompting Basics": 97,
+        "HW2 - Tool Use & Function Calling": 93,
+        "HW3 - Retrieval & Embeddings": 95,
+        "Midterm Project - Build an Agent": 98
+      },
+      "attendance_pct": 99,
+      "late_submissions": 0
+    },
+    "Marcus Webb": {
+      "grades": {
+        "HW1 - Prompting Basics": 55,
+        "HW2 - Tool Use & Function Calling": 61,
+        "HW3 - Retrieval & Embeddings": 58,
+        "Midterm Project - Build an Agent": 60
+      },
+      "attendance_pct": 65,
+      "late_submissions": 4
+    },
+    "Elena Rodriguez": {
+      "grades": {
+        "HW1 - Prompting Basics": 81,
+        "HW2 - Tool Use & Function Calling": 79,
+        "HW3 - Retrieval & Embeddings": 85,
+        "Midterm Project - Build an Agent": 80
+      },
+      "attendance_pct": 90,
+      "late_submissions": 1
+    },
+    "Tom Nguyen": {
+      "grades": {
+        "HW1 - Prompting Basics": 92,
+        "HW2 - Tool Use & Function Calling": 58,
+        "HW3 - Retrieval & Embeddings": 88,
+        "Midterm Project - Build an Agent": 64
+      },
+      "attendance_pct": 85,
+      "late_submissions": 3
+    },
+    "Aisha Bello": {
+      "grades": {
+        "HW1 - Prompting Basics": 85,
+        "HW2 - Tool Use & Function Calling": 88,
+        "HW3 - Retrieval & Embeddings": 90,
+        "Midterm Project - Build an Agent": 86
+      },
+      "attendance_pct": 94,
+      "late_submissions": 0
+    }
+  },
+
+  "deadlines": [
+    { "assignment": "HW4 - Multi-Agent Systems", "due": "2026-09-05", "weight": "10%" },
+    { "assignment": "Final Project Proposal",     "due": "2026-09-19", "weight": "5%"  },
+    { "assignment": "Final Project",              "due": "2026-10-24", "weight": "30%" }
+  ]
+}

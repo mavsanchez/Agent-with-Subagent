@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.gradio/
+.DS_Store
+.idea/
+.vscode/
+
+# The agent's long-term memory. Ships empty so every student starts fresh.
+memories.json
+
+# PNGs rendered by the chart_grades tool at runtime.
+charts/

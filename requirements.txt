@@ -1,0 +1,12 @@
+# ---------------------------------------------------------------------------
+# Only five dependencies. On purpose.
+#
+# There is no LangChain / LangGraph here. The whole point of this demo is that
+# you can SEE the agent loop. Frameworks hide it. It's ~90 lines in agent.py.
+# ---------------------------------------------------------------------------
+
+ollama>=0.4.7      # talks to your local Ollama server (the LLM)
+mcp>=2.0.0         # official Model Context Protocol SDK
+gradio>=6.0        # the GUI
+numpy>=1.24        # cosine similarity for semantic memory search
+matplotlib>=3.8    # the chart_grades tool renders PNGs with this
