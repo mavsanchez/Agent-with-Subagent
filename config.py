@@ -15,10 +15,12 @@ Students: this is the file to experiment with before touching anything else.
 #   ollama pull qwen3:4b      -> MODEL = "qwen3:4b"      (better at tools)
 # Nothing else in the codebase needs to change.
 MODEL = "qwen3:4b"
+# MODEL = "nemotron-3.5-lightning"
 
 # Turns text into vectors so we can search memory by MEANING, not keywords.
 #   ollama pull nomic-embed-text
-EMBED_MODEL = "qwen3-embedding:0.6b"
+EMBED_MODEL = "bge-m3"
+# EMBED_MODEL = "qwen3-embedding:0.6b"
 # EMBED_MODEL = "nomic-embed-text"
 
 # Keeps the model loaded in RAM between calls. Without this, Ollama unloads it

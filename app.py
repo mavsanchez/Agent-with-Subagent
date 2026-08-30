@@ -1,7 +1,7 @@
 """
 app.py — The GUI. Run this file.
 
-    python app.py
+    uv run python app.py
 
 Layout:
 

@@ -18,22 +18,23 @@ ollama pull qwen3:4b
 ollama pull qwen3-embedding:0.6b
 ```
 
-**2. Clone this repo and make an environment:**
+**2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if
+you do not already have it, then clone this repo and create its environment:**
 
 ```bash
 git clone <this-repo-url>
 cd AgentDemo
-conda create -n agentdemo python=3.11 -y
-conda activate agentdemo
-pip install -r requirements.txt
+uv venv --python 3.11
+uv sync
 ```
 
-(venv works fine too if you don't use conda.)
+UV creates and manages the local `.venv` automatically. You do not need to
+activate it manually; `uv run` uses the project environment below.
 
 **3. Check everything:**
 
 ```bash
-python setup_check.py
+uv run python setup_check.py
 ```
 
 All green means you're ready. Anything red prints the exact command to fix it.
@@ -41,7 +42,7 @@ All green means you're ready. Anything red prints the exact command to fix it.
 **4. Run it:**
 
 ```bash
-python app.py
+uv run python app.py
 ```
 
 Your browser opens to `http://127.0.0.1:7860`. Ask it "How is Sam Rivera
@@ -69,7 +70,7 @@ the call.
 flowchart TB
     teacher["Teacher<br/>web browser"]
 
-    subgraph main["Main Python process — python app.py"]
+    subgraph main["Main Python process — uv run python app.py"]
         app["app.py<br/>Gradio UI, callbacks, live panels"]
         state["Short-term state<br/>messages list in gr.State"]
         agent["agent.py<br/>main decide → act → answer loop"]
@@ -90,7 +91,7 @@ flowchart TB
 
     subgraph files["Files on disk"]
         readme["README.md<br/>human documentation"]
-        requirements["requirements.txt<br/>Python dependencies"]
+        project["pyproject.toml<br/>Python dependencies"]
         setup["setup_check.py<br/>preflight entry point"]
         config["config.py<br/>all runtime settings"]
         data["course_data.json<br/>gradebook source of truth"]
@@ -121,8 +122,8 @@ flowchart TB
     server -->|"write chart image"| charts
     charts -->|"path returned in generator event"| app
 
-    requirements -.->|"install dependencies"| app
-    requirements -.->|"install dependencies"| server
+    project -.->|"install dependencies"| app
+    project -.->|"install dependencies"| server
     setup -.->|"check models"| chatmodel
     setup -.->|"check models"| embedmodel
     setup -.->|"test discovery"| client
@@ -156,7 +157,7 @@ Line-color guide:
 | **Green** | Long-term memory and embeddings | `agent.py` → `memory.py` → model/files |
 | **Purple** | Skills and delegated subagent work | `agent.py` → `subagent.py` / `skills_loader.py` |
 | **Blue** | MCP, deterministic tools, data, and artifacts | Agent/subagent → MCP → server → JSON/PNG |
-| **Gray dotted** | Setup, configuration, dependencies, and generated files | `config.py`, `requirements.txt`, `.gitignore`, `__pycache__` |
+| **Gray dotted** | Setup, configuration, dependencies, and generated files | `config.py`, `pyproject.toml`, `uv.lock`, `.gitignore`, `__pycache__` |
 
 There are three important runtime boundaries:
 
@@ -171,7 +172,8 @@ There are three important runtime boundaries:
 
 ### Where execution begins
 
-`python app.py` is the normal entry point. Python executes top-level module
+`uv run python app.py` is the normal entry point. UV selects the project
+environment, then Python executes top-level module
 code from top to bottom:
 
 1. `app.py` imports the supporting modules and reads settings from `config.py`.
@@ -188,7 +190,7 @@ code from top to bottom:
    `run_turn()` generator and paints each yielded event into the appropriate
    panel.
 
-`python setup_check.py` is a separate, optional entry point. It performs
+`uv run python setup_check.py` is a separate, optional entry point. It performs
 preflight checks and exits; it does not start the application.
 
 ### One chat turn, end to end
@@ -266,11 +268,12 @@ The main loop in `agent.run_turn()` has five phases:
 | Path | Responsibility | Where it first enters the runtime |
 |---|---|---|
 | [README.md](README.md) | Human documentation. It is not imported by the application. | You are reading it now. |
-| [requirements.txt](requirements.txt) | Declares the five Python packages used by the project. | `pip install -r requirements.txt`, before runtime. |
+| [pyproject.toml](pyproject.toml) | Declares the Python project metadata and runtime dependencies. | `uv sync`, before runtime. |
+| [uv.lock](uv.lock) | Pins the resolved dependency versions for repeatable environments. | Read automatically by `uv sync`. |
 | [.gitignore](.gitignore) | Keeps environments, caches, memories, and generated charts out of Git. | Git reads it; Python does not. |
-| [setup_check.py](setup_check.py) | Checks Python, packages, Ollama, configured models, and MCP tool discovery. | Run directly with `python setup_check.py`. |
+| [setup_check.py](setup_check.py) | Checks Python, packages, Ollama, configured models, and MCP tool discovery. | Run with `uv run python setup_check.py`. |
 | [config.py](config.py) | Central settings: model names, context size, thresholds, loop limits, and paths. | Imported near the top of almost every Python module. |
-| [app.py](app.py) | Main entry point. Builds the Gradio UI, connects MCP, wires buttons, streams generator events, and renders the teaching panels. | Run directly with `python app.py`; `on_send()` begins a turn. |
+| [app.py](app.py) | Main entry point. Builds the Gradio UI, connects MCP, wires buttons, streams generator events, and renders the teaching panels. | Run with `uv run python app.py`; `on_send()` begins a turn. |
 | [agent.py](agent.py) | Main orchestration loop. Builds prompts and JSON schemas, recalls memory, chooses actions, executes tools/skills/delegation, streams the answer, and reflects afterward. | `app.on_send()` calls the `run_turn()` generator. |
 | [memory.py](memory.py) | Long-term-memory service. Loads/saves JSON, creates embeddings, performs keyword or semantic retrieval, extracts durable facts, and reconciles updates. | `app.render_memory()` reads it while building the UI; `agent.run_turn()` calls `retrieve()` at the start of every turn. |
 | [memories.json](memories.json) | Runtime database of durable fact text and embedding vectors. It may be empty and is intentionally ignored by Git. | Read by `memory.load()`; written by `memory.remember()` after a turn. |

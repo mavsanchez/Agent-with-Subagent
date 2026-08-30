@@ -1,7 +1,7 @@
 """
 setup_check.py — Run this BEFORE class.
 
-    python setup_check.py
+    uv run python setup_check.py
 
 Checks every moving part and tells you the exact command to fix anything
 that's broken. If all the lines are green, the demo will run.
@@ -28,7 +28,7 @@ def check(label, fn, fix):
 
 print(f"\nPython {sys.version.split()[0]}  ({sys.executable})\n")
 if sys.version_info < (3, 10):
-    problems.append("Python 3.10+ required:  conda create -n agentdemo python=3.11")
+    problems.append("Python 3.10+ required:  uv venv --python 3.11 && uv sync")
     print(f"{BAD} Python version — need 3.10 or newer")
 
 
@@ -44,7 +44,7 @@ def _packages():
     return "ollama, mcp, gradio, numpy, matplotlib"
 
 
-have_packages = check("Python packages", _packages, "pip install -r requirements.txt")
+have_packages = check("Python packages", _packages, "uv sync")
 
 
 # --- 2. is the Ollama server running? --------------------------------------
@@ -121,4 +121,4 @@ if problems:
     print()
     sys.exit(1)
 
-print("All checks passed. Start the demo with:\n\n    python app.py\n")
+print("All checks passed. Start the demo with:\n\n    uv run python app.py\n")

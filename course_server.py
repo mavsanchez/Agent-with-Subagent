@@ -53,7 +53,7 @@ call this tool. Write docstrings like you're writing instructions, because
 you are.
 
 RUN IT STANDALONE (to prove it's a real server):
-    python course_server.py
+    uv run python course_server.py
     (it will sit there waiting for JSON-RPC on stdin -- Ctrl+C to quit)
 """
 

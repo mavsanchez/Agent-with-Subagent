@@ -72,8 +72,8 @@ class MCPClient:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
 
     async def _connect(self) -> None:
-        # sys.executable = the python running right now, so the server lands in
-        # the same conda/venv environment. Avoids "works on my machine" pain.
+        # sys.executable = the Python running right now, so the server lands in
+        # the same UV-managed environment. Avoids "works on my machine" pain.
         params = StdioServerParameters(
             command=sys.executable,
             args=[self.server_script],
