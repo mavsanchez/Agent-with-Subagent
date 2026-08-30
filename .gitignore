@@ -1,4 +1,4 @@
-__pycache__/
+__pycache__
 *.pyc
 .venv/
 venv/
@@ -13,3 +13,5 @@ memories.json
 
 # PNGs rendered by the chart_grades tool at runtime.
 charts/
+/__pycache__
+

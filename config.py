@@ -14,11 +14,12 @@ Students: this is the file to experiment with before touching anything else.
 #   ollama pull gemma3:1b     -> MODEL = "gemma3:1b"     (fast, dumber)
 #   ollama pull qwen3:4b      -> MODEL = "qwen3:4b"      (better at tools)
 # Nothing else in the codebase needs to change.
-MODEL = "gemma3:4b"
+MODEL = "qwen3:4b"
 
 # Turns text into vectors so we can search memory by MEANING, not keywords.
 #   ollama pull nomic-embed-text
-EMBED_MODEL = "nomic-embed-text"
+EMBED_MODEL = "qwen3-embedding:0.6b"
+# EMBED_MODEL = "nomic-embed-text"
 
 # Keeps the model loaded in RAM between calls. Without this, Ollama unloads it
 # after ~5 min and the next question takes 10+ extra seconds. Demo killer.

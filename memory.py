@@ -60,8 +60,66 @@ def embed(text: str) -> list[float]:
 
 def cosine(a, b) -> float:
     """Similarity between two vectors: 1.0 = identical, 0.0 = unrelated."""
-    a, b = np.array(a), np.array(b)
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    # Embedding models do not all produce vectors of the same size.  A model
+    # change must not take down the whole chat if an old record is still on
+    # disk; migration is handled by _ensure_compatible_embeddings below.
+    if a.ndim != 1 or b.ndim != 1 or a.shape != b.shape:
+        return 0.0
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+
+def _embedding_size(embedding) -> int | None:
+    """Return a valid embedding's dimension, or None for bad stored data."""
+    try:
+        vector = np.asarray(embedding, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if vector.ndim != 1 or vector.size == 0:
+        return None
+    return int(vector.size)
+
+
+def _ensure_compatible_embeddings(
+    memories: list[dict], expected_size: int
+) -> list[dict]:
+    """Re-embed records created by a different or incompatible model.
+
+    Embeddings are persisted alongside the text, so changing EMBED_MODEL can
+    leave records from the previous model in memories.json.  Re-embedding the
+    text preserves those memories and makes the migration a one-time cost.
+    """
+    compatible = []
+    changed = False
+
+    for memory in memories:
+        if not isinstance(memory, dict) or not isinstance(memory.get("text"), str):
+            continue
+
+        model_changed = (
+            memory.get("embedding_model") is not None
+            and memory.get("embedding_model") != config.EMBED_MODEL
+        )
+        size_changed = _embedding_size(memory.get("embedding")) != expected_size
+
+        if model_changed or size_changed:
+            vector = embed(memory["text"])
+            actual_size = _embedding_size(vector)
+            if actual_size != expected_size:
+                raise RuntimeError(
+                    f"Embedding model '{config.EMBED_MODEL}' returned {actual_size} "
+                    f"dimensions; expected {expected_size}."
+                )
+            memory["embedding"] = vector
+            memory["embedding_model"] = config.EMBED_MODEL
+            changed = True
+
+        if _embedding_size(memory.get("embedding")) == expected_size:
+            compatible.append(memory)
+
+    if changed:
+        save(memories)
+    return compatible
 
 
 # ---------------------------------------------------------------------------
@@ -309,10 +367,16 @@ def remember(fact: str) -> str:
     """
     memories = load()
     vector = embed(fact)
+    vector_size = _embedding_size(vector)
+    if vector_size is None:
+        raise RuntimeError(
+            f"Embedding model '{config.EMBED_MODEL}' returned an invalid vector."
+        )
+    compatible_memories = _ensure_compatible_embeddings(memories, vector_size)
 
     # Find the most similar thing we already believe.
     best, best_score = None, 0.0
-    for m in memories:
+    for m in compatible_memories:
         score = cosine(vector, m["embedding"])
         if score > best_score:
             best, best_score = m, score
@@ -327,11 +391,19 @@ def remember(fact: str) -> str:
         if action == "update":
             best["text"] = fact
             best["embedding"] = vector
+            best["embedding_model"] = config.EMBED_MODEL
             save(memories)
             return f"UPDATE #{best['id']} (sim={best_score:.2f}) - {fact}"
 
     next_id = max((m["id"] for m in memories), default=0) + 1
-    memories.append({"id": next_id, "text": fact, "embedding": vector})
+    memories.append(
+        {
+            "id": next_id,
+            "text": fact,
+            "embedding": vector,
+            "embedding_model": config.EMBED_MODEL,
+        }
+    )
     save(memories)
     return f"ADD #{next_id} - {fact}"
 
@@ -361,6 +433,12 @@ def retrieve(query: str, mode: str = "semantic") -> list[dict]:
 
     # Semantic: compare MEANING. Finds "vegetarian" from "what should I eat?"
     query_vector = embed(query)
+    query_size = _embedding_size(query_vector)
+    if query_size is None:
+        raise RuntimeError(
+            f"Embedding model '{config.EMBED_MODEL}' returned an invalid vector."
+        )
+    memories = _ensure_compatible_embeddings(memories, query_size)
     scored = [(cosine(query_vector, m["embedding"]), m) for m in memories]
     scored.sort(key=lambda pair: pair[0], reverse=True)
 

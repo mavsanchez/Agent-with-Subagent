@@ -101,6 +101,7 @@ def _mcp_server():
     client = MCPClient(config.MCP_SERVER_SCRIPT)
     client.connect()
     names = [t.name for t in client.tools]
+    print('MCP tools',names)
     client.close()
     if not names:
         raise RuntimeError("server started but advertised no tools")
