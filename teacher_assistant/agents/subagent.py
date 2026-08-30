@@ -1,7 +1,7 @@
 """
 subagent.py — SUBAGENTS.
 
-Read agent.py first. This file is the SAME LOOP, smaller, and that is the point:
+Read main.py first. This file is the SAME LOOP, smaller, and that is the point:
 a subagent is not a new kind of object. It is another agent loop, with its own
 prompt, its own tools, and -- the part that matters -- ITS OWN CONTEXT WINDOW.
 
@@ -30,10 +30,10 @@ said. Whatever it needs, the parent must PASS IN -- see `briefing` below.
 Students always expect delegation to be free. It isn't: you pay for it in
 briefing, and a bad briefing produces a confident, isolated, wrong answer.
 
-WHY IS THIS A SEPARATE FILE INSTEAD OF REUSING agent.py's FUNCTIONS?
+WHY IS THIS A SEPARATE FILE INSTEAD OF REUSING main.py's FUNCTIONS?
 --------------------------------------------------------------------
 So you can read it start to finish on its own and compare the two side by side.
-Yes, `_decide` below is nearly a copy of `decide` in agent.py. That duplication
+Yes, `_decide` below is nearly a copy of `decide` in main.py. That duplication
 is deliberate teaching, not an accident -- put the two files next to each other
 and notice they are the same four steps.
 """
@@ -42,8 +42,8 @@ import json
 
 import ollama
 
-import config
-import skills_loader
+from teacher_assistant import settings
+from teacher_assistant.skills import loader
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ def _build_schema(tools) -> dict:
 
 def _decide(system_prompt: str, task: str, schema: dict) -> dict:
     response = ollama.chat(
-        model=config.MODEL,
+        model=settings.MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -142,8 +142,11 @@ def _decide(system_prompt: str, task: str, schema: dict) -> dict:
             },
         ],
         format=schema,
-        options={"temperature": config.TEMPERATURE, "num_predict": config.MAX_DECISION_TOKENS},
-        keep_alive=config.KEEP_ALIVE,
+        options=settings.chat_options(
+            temperature=settings.TEMPERATURE,
+            num_predict=settings.MAX_DECISION_TOKENS,
+        ),
+        keep_alive=settings.KEEP_ALIVE,
     )
     try:
         decision = json.loads(response["message"]["content"])
@@ -157,7 +160,7 @@ def _decide(system_prompt: str, task: str, schema: dict) -> dict:
 def _repair_args(system_prompt: str, task: str, tool) -> dict:
     """Same repair trick as the parent: re-ask using the tool's OWN schema."""
     response = ollama.chat(
-        model=config.MODEL,
+        model=settings.MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -167,8 +170,11 @@ def _repair_args(system_prompt: str, task: str, tool) -> dict:
             },
         ],
         format=tool.input_schema,
-        options={"temperature": config.TEMPERATURE, "num_predict": config.MAX_DECISION_TOKENS},
-        keep_alive=config.KEEP_ALIVE,
+        options=settings.chat_options(
+            temperature=settings.TEMPERATURE,
+            num_predict=settings.MAX_DECISION_TOKENS,
+        ),
+        keep_alive=settings.KEEP_ALIVE,
     )
     try:
         return json.loads(response["message"]["content"])
@@ -179,7 +185,9 @@ def _repair_args(system_prompt: str, task: str, tool) -> dict:
 # ---------------------------------------------------------------------------
 # PROMPT ASSEMBLY — the subagent's ENTIRE world
 # ---------------------------------------------------------------------------
-def _build_system_prompt(spec, skill_body, briefing, observations) -> str:
+def _build_system_prompt(
+    spec, skill_body, briefing, observations, include_tools: bool = True,
+) -> str:
     """Compare this to agent.build_system_prompt(). Notice what is MISSING:
 
         no conversation history      no long-term memory
@@ -200,12 +208,16 @@ def _build_system_prompt(spec, skill_body, briefing, observations) -> str:
         )
         parts.append("\n".join(lines))
 
-    lines = ["\n## TOOLS YOU CAN CALL"]
-    for tool in spec["_tools"]:
-        params = ", ".join(tool.input_schema.get("properties", {}).keys()) or "none"
-        description = "\n".join(f"  {l.strip()}" for l in tool.description.strip().splitlines())
-        lines.append(f"- {tool.name}({params}):\n{description}")
-    parts.append("\n".join(lines))
+    if include_tools:
+        lines = ["\n## TOOLS YOU CAN CALL"]
+        for tool in spec["_tools"]:
+            params = ", ".join(tool.input_schema.get("properties", {}).keys()) or "none"
+            description = "\n".join(
+                f"  {line.strip()}"
+                for line in tool.description.strip().splitlines()
+            )
+            lines.append(f"- {tool.name}({params}):\n{description}")
+        parts.append("\n".join(lines))
 
     # The bulky part. It lives HERE and only here.
     parts.append(f"\n## YOUR PROCEDURE — follow it exactly\n\n{skill_body}")
@@ -229,6 +241,7 @@ def run(mcp, spec: dict, task: str, briefing: list[str]):
     Yields (kind, payload):
         ("trace", str)   -> a line for the parent's Trace panel (indented there)
         ("panel", dict)  -> the Subagent tab's live state
+        ("token", str)   -> a piece of the finished work for the chat stream
         ("result", str)  -> the finished work, handed back to the parent
     """
     spec = dict(spec)
@@ -255,7 +268,7 @@ def run(mcp, spec: dict, task: str, briefing: list[str]):
     # specialist; a specialist that might not read its own instructions is just a
     # coin flip. The parent still uses on-demand load_skill (progressive
     # disclosure); a subagent's skill IS its job description.
-    skill_body = skills_loader.load_skill(spec["skill"])
+    skill_body = loader.load_skill(spec["skill"])
     panel["skill_tokens"] = len(skill_body) // 4
     line = (
         f"loaded skill `{spec['skill']}` (+~{panel['skill_tokens']} tokens) "
@@ -270,7 +283,7 @@ def run(mcp, spec: dict, task: str, briefing: list[str]):
     observations: list[tuple[str, str]] = []
     already_called: set[str] = set()
 
-    for step in range(config.SUBAGENT_MAX_TOOL_STEPS):
+    for step in range(settings.SUBAGENT_MAX_TOOL_STEPS):
         system_prompt = _build_system_prompt(spec, skill_body, briefing, observations)
         decision = _decide(system_prompt, task, schema)
         tool = decision["tool"]
@@ -310,11 +323,13 @@ def run(mcp, spec: dict, task: str, briefing: list[str]):
         yield ("panel", dict(panel))
 
     # --- ANSWER -------------------------------------------------------------
-    # Not streamed to the chat. The teacher does not watch a subagent think --
-    # they get the finished work. The parent is the only reader.
-    system_prompt = _build_system_prompt(spec, skill_body, briefing, observations)
-    response = ollama.chat(
-        model=config.MODEL,
+    # This is finished, teacher-facing work, so stream it directly through the
+    # parent instead of making the parent regenerate the same text.
+    system_prompt = _build_system_prompt(
+        spec, skill_body, briefing, observations, include_tools=False,
+    )
+    stream = ollama.chat(
+        model=settings.MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -323,11 +338,20 @@ def run(mcp, spec: dict, task: str, briefing: list[str]):
                 "the email and nothing else.",
             },
         ],
-        keep_alive=config.KEEP_ALIVE,
+        stream=True,
+        options=settings.chat_options(num_predict=settings.MAX_ANSWER_TOKENS),
+        keep_alive=settings.KEEP_ALIVE,
     )
-    output = response["message"]["content"].strip()
+    output = ""
+    for chunk in stream:
+        piece = chunk["message"]["content"]
+        output += piece
+        if piece:
+            yield ("token", piece)
+        if chunk.get("done"):
+            panel["prompt_tokens"] = chunk.get("prompt_eval_count", 0)
+    output = output.strip()
 
-    panel["prompt_tokens"] = response.get("prompt_eval_count", 0)
     panel["result"] = output
     panel["status"] = "done"
 

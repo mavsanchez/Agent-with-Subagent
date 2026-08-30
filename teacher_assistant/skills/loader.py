@@ -1,5 +1,5 @@
 """
-skills_loader.py — SKILLS, and progressive disclosure.
+loader.py — SKILLS, and progressive disclosure.
 
 MEMORY vs SKILLS, the distinction worth putting on a slide:
 
@@ -22,7 +22,7 @@ So we do what Claude Code does:
 
 Watch the token counter in the GUI when you trigger one. That gap is the lesson.
 
-FILE FORMAT (skills/<name>/SKILL.md):
+FILE FORMAT (teacher_assistant/skills/<name>/SKILL.md):
     ---
     name: study-plan
     description: When to use this skill. The agent reads THIS to decide.
@@ -30,11 +30,9 @@ FILE FORMAT (skills/<name>/SKILL.md):
     Markdown instructions the agent follows once loaded.
 """
 
-from pathlib import Path
+from teacher_assistant import settings
 
-import config
-
-SKILLS_PATH = Path(__file__).parent / config.SKILLS_DIR
+SKILLS_PATH = settings.SKILLS_PATH
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:

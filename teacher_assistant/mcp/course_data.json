@@ -95,8 +95,12 @@
   },
 
   "deadlines": [
-    { "assignment": "HW4 - Multi-Agent Systems", "due": "2026-09-05", "weight": "10%" },
+    { "assignment": "HW1 - Prompting Basics", "due": "2026-09-05", "weight": "10%" },
+    { "assignment": "HW2 - Tool Use & Function Calling", "due": "2026-09-12", "weight": "10%" },
+    { "assignment": "HW3 - Retrieval & Embeddings", "due": "2026-09-19", "weight": "10%" },
+    { "assignment": "HW4 - Multi-Agent Systems", "due": "2026-09-26", "weight": "10%" },
     { "assignment": "Final Project Proposal",     "due": "2026-09-19", "weight": "5%"  },
-    { "assignment": "Final Project",              "due": "2026-10-24", "weight": "30%" }
+    { "assignment": "Final Project",              "due": "2026-10-24", "weight": "30%" },
+    { "assignment": "Final Exam",                 "due": "2026-11-15", "weight": "25%" }
   ]
 }

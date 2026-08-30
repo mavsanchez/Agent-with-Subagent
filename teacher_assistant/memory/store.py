@@ -1,7 +1,7 @@
 """
-memory.py — LONG-TERM MEMORY.
+store.py — LONG-TERM MEMORY.
 
-Short-term memory is just a Python list of messages (see agent.py). It lives in
+Short-term memory is just a Python list of messages (see agents/main.py). It lives in
 RAM, it has a size limit, and when it overflows, facts are gone forever.
 
 Long-term memory is this file: durable facts, written to memories.json, that
@@ -16,14 +16,13 @@ keyword-vs-semantic comparison lives.
 """
 
 import json
-from pathlib import Path
 
 import numpy as np
 import ollama
 
-import config
+from teacher_assistant import settings
 
-MEMORY_PATH = Path(__file__).parent / config.MEMORY_FILE
+MEMORY_PATH = settings.MEMORY_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +50,9 @@ def wipe() -> None:
 # final?" can find "Priya has an extended-time accommodation for exams".
 def embed(text: str) -> list[float]:
     response = ollama.embed(
-        model=config.EMBED_MODEL,
+        model=settings.EMBED_MODEL,
         input=text,
-        keep_alive=config.KEEP_ALIVE,
+        keep_alive=settings.KEEP_ALIVE,
     )
     return response["embeddings"][0]
 
@@ -98,7 +97,7 @@ def _ensure_compatible_embeddings(
 
         model_changed = (
             memory.get("embedding_model") is not None
-            and memory.get("embedding_model") != config.EMBED_MODEL
+            and memory.get("embedding_model") != settings.EMBED_MODEL
         )
         size_changed = _embedding_size(memory.get("embedding")) != expected_size
 
@@ -107,11 +106,11 @@ def _ensure_compatible_embeddings(
             actual_size = _embedding_size(vector)
             if actual_size != expected_size:
                 raise RuntimeError(
-                    f"Embedding model '{config.EMBED_MODEL}' returned {actual_size} "
+                    f"Embedding model '{settings.EMBED_MODEL}' returned {actual_size} "
                     f"dimensions; expected {expected_size}."
                 )
             memory["embedding"] = vector
-            memory["embedding_model"] = config.EMBED_MODEL
+            memory["embedding_model"] = settings.EMBED_MODEL
             changed = True
 
         if _embedding_size(memory.get("embedding")) == expected_size:
@@ -257,14 +256,14 @@ def extract_facts(user_msg: str, assistant_msg: str = "") -> list[str]:
         )
 
     response = ollama.chat(
-        model=config.MODEL,
+        model=settings.MODEL,
         messages=[
             {"role": "system", "content": EXTRACT_PROMPT},
             {"role": "user", "content": exchange},
         ],
         format=_EXTRACT_SCHEMA,
-        options={"temperature": 0, "num_predict": 200},
-        keep_alive=config.KEEP_ALIVE,
+        options=settings.chat_options(temperature=0, num_predict=200),
+        keep_alive=settings.KEEP_ALIVE,
     )
     try:
         facts = json.loads(response["message"]["content"]).get("facts", [])
@@ -344,14 +343,14 @@ _RECONCILE_SCHEMA = {
 
 def _reconcile(new_fact: str, existing_fact: str) -> tuple[str, str]:
     response = ollama.chat(
-        model=config.MODEL,
+        model=settings.MODEL,
         messages=[
             {"role": "system", "content": RECONCILE_PROMPT},
             {"role": "user", "content": f"EXISTING: {existing_fact}\nNEW: {new_fact}"},
         ],
         format=_RECONCILE_SCHEMA,
-        options={"temperature": 0, "num_predict": 200},
-        keep_alive=config.KEEP_ALIVE,
+        options=settings.chat_options(temperature=0, num_predict=200),
+        keep_alive=settings.KEEP_ALIVE,
     )
     try:
         result = json.loads(response["message"]["content"])
@@ -370,7 +369,7 @@ def remember(fact: str) -> str:
     vector_size = _embedding_size(vector)
     if vector_size is None:
         raise RuntimeError(
-            f"Embedding model '{config.EMBED_MODEL}' returned an invalid vector."
+            f"Embedding model '{settings.EMBED_MODEL}' returned an invalid vector."
         )
     compatible_memories = _ensure_compatible_embeddings(memories, vector_size)
 
@@ -382,7 +381,7 @@ def remember(fact: str) -> str:
             best, best_score = m, score
 
     # Similar enough to be suspicious? Ask the model what to do.
-    if best is not None and best_score >= config.SIMILARITY_THRESHOLD:
+    if best is not None and best_score >= settings.SIMILARITY_THRESHOLD:
         action, reason = _reconcile(fact, best["text"])
 
         if action == "skip":
@@ -391,7 +390,7 @@ def remember(fact: str) -> str:
         if action == "update":
             best["text"] = fact
             best["embedding"] = vector
-            best["embedding_model"] = config.EMBED_MODEL
+            best["embedding_model"] = settings.EMBED_MODEL
             save(memories)
             return f"UPDATE #{best['id']} (sim={best_score:.2f}) - {fact}"
 
@@ -401,7 +400,7 @@ def remember(fact: str) -> str:
             "id": next_id,
             "text": fact,
             "embedding": vector,
-            "embedding_model": config.EMBED_MODEL,
+            "embedding_model": settings.EMBED_MODEL,
         }
     )
     save(memories)
@@ -429,14 +428,14 @@ def retrieve(query: str, mode: str = "semantic") -> list[dict]:
             if overlap > 0:
                 hits.append((overlap, m))
         hits.sort(key=lambda pair: pair[0], reverse=True)
-        return [m for _, m in hits[: config.RETRIEVAL_TOP_K]]
+        return [m for _, m in hits[: settings.RETRIEVAL_TOP_K]]
 
     # Semantic: compare MEANING. Finds "vegetarian" from "what should I eat?"
     query_vector = embed(query)
     query_size = _embedding_size(query_vector)
     if query_size is None:
         raise RuntimeError(
-            f"Embedding model '{config.EMBED_MODEL}' returned an invalid vector."
+            f"Embedding model '{settings.EMBED_MODEL}' returned an invalid vector."
         )
     memories = _ensure_compatible_embeddings(memories, query_size)
     scored = [(cosine(query_vector, m["embedding"]), m) for m in memories]
@@ -445,4 +444,8 @@ def retrieve(query: str, mode: str = "semantic") -> list[dict]:
     # ---- MODIFY HERE ----
     # A relevance floor. Too high and nothing is recalled; too low and every
     # question drags in irrelevant facts. Try 0.0 to see the failure mode.
-    return [m for score, m in scored[: config.RETRIEVAL_TOP_K] if score > 0.35]
+    return [
+        m
+        for score, m in scored[: settings.RETRIEVAL_TOP_K]
+        if score > settings.RETRIEVAL_MIN_SCORE
+    ]

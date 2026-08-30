@@ -9,9 +9,9 @@ env/
 .vscode/
 
 # The agent's long-term memory. Ships empty so every student starts fresh.
-memories.json
+teacher_assistant/memory/memories.json
 
 # PNGs rendered by the chart_grades tool at runtime.
-charts/
+teacher_assistant/mcp/charts/
 /__pycache__
 

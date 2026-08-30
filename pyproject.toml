@@ -13,6 +13,6 @@ dependencies = [
 ]
 
 [tool.uv]
-# This repository is a collection of runnable scripts, not an installable
-# Python package. UV should manage the environment and dependencies only.
+# UV manages dependencies only. The two root entry-point scripts import the
+# local teacher_assistant package directly; the project is not installed.
 package = false

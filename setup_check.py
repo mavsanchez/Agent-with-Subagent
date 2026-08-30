@@ -10,6 +10,8 @@ that's broken. If all the lines are green, the demo will run.
 import importlib.util
 import sys
 
+from teacher_assistant import settings
+
 OK, BAD = "  [ OK ]", "  [FAIL]"
 problems = []
 
@@ -82,23 +84,23 @@ def _model_present(name):
 
 
 if server_up:
-    import config
-
-    check(f"Model '{config.MODEL}'", _model_present(config.MODEL), f"ollama pull {config.MODEL}")
     check(
-        f"Embeddings '{config.EMBED_MODEL}'",
-        _model_present(config.EMBED_MODEL),
-        f"ollama pull {config.EMBED_MODEL}",
+        f"Model '{settings.MODEL}'",
+        _model_present(settings.MODEL),
+        f"ollama pull {settings.MODEL}",
+    )
+    check(
+        f"Embeddings '{settings.EMBED_MODEL}'",
+        _model_present(settings.EMBED_MODEL),
+        f"ollama pull {settings.EMBED_MODEL}",
     )
 
 
 # --- 4. does the MCP server actually start and expose tools? ---------------
 def _mcp_server():
-    from mcp_client import MCPClient
+    from teacher_assistant.mcp.client import MCPClient
 
-    import config
-
-    client = MCPClient(config.MCP_SERVER_SCRIPT)
+    client = MCPClient(settings.MCP_SERVER_PATH)
     client.connect()
     names = [t.name for t in client.tools]
     print('MCP tools',names)
@@ -109,7 +111,11 @@ def _mcp_server():
 
 
 if server_up:
-    check("MCP server", _mcp_server, "Check course_server.py for syntax errors")
+    check(
+        "MCP server",
+        _mcp_server,
+        "Check teacher_assistant/mcp/course_server.py for syntax errors",
+    )
 
 
 # --- summary ---------------------------------------------------------------

@@ -1,9 +1,26 @@
 """
-config.py — Every knob in the system, in one place.
+settings.py — Every knob and project path in the system, in one place.
 
 If you want to change how the demo behaves, change it HERE first.
 Students: this is the file to experiment with before touching anything else.
 """
+
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# PROJECT PATHS
+# ---------------------------------------------------------------------------
+# Resolve paths from this package instead of the process working directory.
+# That keeps both entry points reliable when they are launched from elsewhere.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MCP_SERVER_PATH = (
+    PROJECT_ROOT / "teacher_assistant" / "mcp" / "course_server.py"
+).resolve()
+MEMORY_PATH = (
+    PROJECT_ROOT / "teacher_assistant" / "memory" / "memories.json"
+).resolve()
+SKILLS_PATH = (PROJECT_ROOT / "teacher_assistant" / "skills").resolve()
 
 # ---------------------------------------------------------------------------
 # MODELS
@@ -14,8 +31,20 @@ Students: this is the file to experiment with before touching anything else.
 #   ollama pull gemma3:1b     -> MODEL = "gemma3:1b"     (fast, dumber)
 #   ollama pull qwen3:4b      -> MODEL = "qwen3:4b"      (better at tools)
 # Nothing else in the codebase needs to change.
-MODEL = "qwen3:4b"
+MODEL = "gemma3:4b"
 # MODEL = "nemotron-3.5-lightning"
+
+# Keep every chat call inside a modest shared context window so Ollama does not
+# allocate the model's much larger default context. Final prose is capped
+# separately from the short, structured routing decisions below.
+MODEL_CONTEXT_TOKENS = 8192
+MAX_ANSWER_TOKENS = 384
+
+
+def chat_options(**overrides) -> dict:
+    """Return fresh Ollama chat options with the shared context configured."""
+    return {"num_ctx": MODEL_CONTEXT_TOKENS, **overrides}
+
 
 # Turns text into vectors so we can search memory by MEANING, not keywords.
 #   ollama pull nomic-embed-text
@@ -45,13 +74,11 @@ TEMPERATURE = 0.0
 SHORT_TERM_MAX_TURNS = 6
 
 
-# ---------------------------------------------------------------------------
-# LONG-TERM MEMORY (facts on disk)
-# ---------------------------------------------------------------------------
-MEMORY_FILE = "memories.json"
-
 # How many remembered facts get injected into the prompt each turn.
 RETRIEVAL_TOP_K = 3
+
+# Minimum semantic similarity required before a stored fact is recalled.
+RETRIEVAL_MIN_SCORE = 0.50
 
 # When a NEW fact is this similar to an OLD one (0-1 cosine), we suspect they
 # are about the same thing and ask the model: add, update, or skip?
@@ -81,17 +108,9 @@ MAX_TOOL_STEPS = 3
 MAX_DECISION_TOKENS = 200
 
 # ---------------------------------------------------------------------------
-# SUBAGENTS (see subagent.py)
+# SUBAGENTS (see agents/subagent.py)
 # ---------------------------------------------------------------------------
-# A subagent gets its own, SHORTER leash than the parent. It has one job and one
-# or two tools; if it hasn't gathered what it needs in two steps, it is lost, and
-# more steps will not save it -- they will just make the demo slow. Every nested
-# agent multiplies your worst-case latency, so cap the child tighter than the
-# parent and mean it.
-SUBAGENT_MAX_TOOL_STEPS = 2
-
-# The MCP server we launch as a subprocess. Add more servers here later.
-MCP_SERVER_SCRIPT = "course_server.py"
-
-# Where SKILL.md files live.
-SKILLS_DIR = "skills"
+# The current specialist has one job and needs exactly one student_report call.
+# A single step prevents an unnecessary second routing pass while keeping the
+# child more tightly bounded than the parent.
+SUBAGENT_MAX_TOOL_STEPS = 1

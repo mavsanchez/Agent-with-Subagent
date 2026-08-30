@@ -21,41 +21,54 @@ still being sent to the model. When those two disagree, you are looking at the
 context window limit with your own eyes.
 """
 
-import threading
-
 import gradio as gr
 import ollama
 
-import config
-import memory
-import skills_loader
-import subagent
-from agent import run_turn
-from mcp_client import MCPClient
+from teacher_assistant import settings
+from teacher_assistant.agents import subagent
+from teacher_assistant.agents.main import run_turn
+from teacher_assistant.mcp.client import MCPClient
+from teacher_assistant.memory import store
+from teacher_assistant.skills import loader
 
 # ---------------------------------------------------------------------------
 # STARTUP
 # ---------------------------------------------------------------------------
 print("Connecting to MCP server...")
-MCP = MCPClient(config.MCP_SERVER_SCRIPT)
+MCP = MCPClient(settings.MCP_SERVER_PATH)
 MCP.connect()
 print(f"  connected. Tools discovered: {[t.name for t in MCP.tools]}")
 
 
 def _warm_up():
-    """Load the model into RAM now, so the first question isn't 15s slower."""
+    """Load both models before the UI opens so the first turn stays responsive."""
+    try:
+        ollama.embed(
+            model=settings.EMBED_MODEL,
+            input="hi",
+            options=settings.chat_options(),
+            keep_alive=settings.KEEP_ALIVE,
+        )
+        print(f"  {settings.EMBED_MODEL} warmed up and resident.")
+    except Exception as e:
+        print(f"  WARNING: could not warm {settings.EMBED_MODEL} ({e}).")
+
     try:
         ollama.chat(
-            model=config.MODEL,
+            model=settings.MODEL,
             messages=[{"role": "user", "content": "hi"}],
-            keep_alive=config.KEEP_ALIVE,
+            options=settings.chat_options(
+                temperature=settings.TEMPERATURE,
+                num_predict=1,
+            ),
+            keep_alive=settings.KEEP_ALIVE,
         )
-        print(f"  {config.MODEL} warmed up and resident.")
+        print(f"  {settings.MODEL} warmed up and resident.")
     except Exception as e:
         print(f"  WARNING: could not reach Ollama ({e}). Run `ollama serve`.")
 
 
-threading.Thread(target=_warm_up, daemon=True).start()
+_warm_up()
 
 
 # ---------------------------------------------------------------------------
@@ -63,11 +76,12 @@ threading.Thread(target=_warm_up, daemon=True).start()
 # ---------------------------------------------------------------------------
 def render_context(messages: list[dict]) -> str:
     """SHORT-TERM MEMORY: exactly what gets sent to the model."""
-    limit = config.SHORT_TERM_MAX_TURNS * 2
+    limit = settings.SHORT_TERM_MAX_TURNS * 2
     header = (
         f"### Short-term memory\n"
         f"`{len(messages)} / {limit}` messages in the window "
-        f"(= {config.SHORT_TERM_MAX_TURNS} turns, set in `config.py`)\n\n"
+        f"(= {settings.SHORT_TERM_MAX_TURNS} turns, set in "
+        "`teacher_assistant/settings.py`)\n\n"
     )
     if len(messages) >= limit:
         header += "> **FULL.** Every new message now pushes an old one out permanently.\n\n"
@@ -84,8 +98,9 @@ def render_context(messages: list[dict]) -> str:
 
 def render_memory() -> str:
     """LONG-TERM MEMORY: the contents of memories.json."""
-    memories = memory.load()
-    header = f"### Long-term memory\n`{len(memories)}` fact(s) in `{config.MEMORY_FILE}`\n\n"
+    memories = store.load()
+    memory_label = settings.MEMORY_PATH.relative_to(settings.PROJECT_ROOT).as_posix()
+    header = f"### Long-term memory\n`{len(memories)}` fact(s) in `{memory_label}`\n\n"
     if not memories:
         return header + "_empty — tell the agent something the gradebook doesn't know (an accommodation, a circumstance, a preference)_"
     return header + "\n".join(f"- **#{m['id']}** {m['text']}" for m in memories)
@@ -94,7 +109,8 @@ def render_memory() -> str:
 def render_tools() -> str:
     """What the agent discovered at runtime — nothing here is hardcoded."""
     out = ["### Tools (discovered live over MCP)"]
-    out.append(f"_Server: `{config.MCP_SERVER_SCRIPT}`, running as a separate process._\n")
+    server_label = settings.MCP_SERVER_PATH.relative_to(settings.PROJECT_ROOT).as_posix()
+    out.append(f"_Server: `{server_label}`, running as a separate process._\n")
     for tool in MCP.tools:
         params = ", ".join(tool.input_schema.get("properties", {}).keys()) or ""
         out.append(f"- **`{tool.name}({params})`** — {tool.description.strip().splitlines()[0]}")
@@ -103,7 +119,7 @@ def render_tools() -> str:
     owned = subagent.owned_skills()
     out.append("\n### Skills the main agent can load")
     out.append("_Full instructions load on demand. That's progressive disclosure._\n")
-    for skill in skills_loader.list_skills():
+    for skill in loader.list_skills():
         if skill["name"].lower() not in owned:
             out.append(f"- **{skill['name']}** — {skill['description']}")
 
@@ -222,52 +238,78 @@ def on_send(user_text, chat, messages, retrieval_mode, use_subagent):
     global _LAST_SUBAGENT
 
     if not user_text.strip():
-        yield (
-            user_text, chat, messages, "", render_context(messages),
-            render_memory(), "", render_subagent(_LAST_SUBAGENT),
-        )
+        yield tuple(gr.skip() for _ in range(8))
         return
 
     chat = chat + [
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": ""},
     ]
-    trace_lines, stats = [], ""
+    trace_lines = []
+
+    # Paint the submitted message before retrieval or any model call starts.
+    # The status beneath the chat stays visible even when the Trace tab is not.
+    yield (
+        "",
+        chat,
+        gr.skip(),
+        "### Trace\n**Working...**",
+        gr.skip(),
+        gr.skip(),
+        "**Working...**",
+        gr.skip(),
+    )
 
     # run_turn is a generator; each event updates a different part of the UI.
     for kind, payload in run_turn(MCP, messages, user_text, retrieval_mode, use_subagent):
         if kind == "trace":
             trace_lines.append(payload)
+            yield (
+                gr.skip(), gr.skip(), gr.skip(),
+                "### Trace\n" + "\n\n".join(trace_lines),
+                gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+            )
         elif kind == "chart":
             # A tool rendered a PNG. Show the image itself in the chat, just
             # above the answer that's about to stream in. The LLM never sees
             # this image -- tools return artifacts, the model returns words.
             chat.insert(len(chat) - 1, {"role": "assistant", "content": gr.Image(payload)})
+            yield (
+                gr.skip(), chat, gr.skip(), gr.skip(),
+                gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+            )
         elif kind == "subagent":
             # A second agent is running. Its state goes to its own tab -- never
             # into the chat, and never into `messages`. That's the isolation.
             _LAST_SUBAGENT = payload
+            yield (
+                gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+                gr.skip(), gr.skip(), gr.skip(), render_subagent(_LAST_SUBAGENT),
+            )
         elif kind == "token":
             chat[-1]["content"] += payload
+            yield (
+                gr.skip(), chat, gr.skip(), gr.skip(),
+                gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+            )
         elif kind == "stats":
             stats = (
                 f"**Prompt size:** {payload['prompt_tokens']} tokens &nbsp;|&nbsp; "
                 f"**Skills loaded:** {payload['skills_loaded']} &nbsp;|&nbsp; "
                 f"**Delegations:** {payload['delegations']}"
             )
+            yield (
+                gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+                gr.skip(), gr.skip(), stats, gr.skip(),
+            )
         elif kind == "done":
             messages = payload
-
-        yield (
-            "",
-            chat,
-            messages,
-            "### Trace\n" + "\n\n".join(trace_lines),
-            render_context(messages),
-            render_memory(),
-            stats,
-            render_subagent(_LAST_SUBAGENT),
-        )
+            # Reflection has completed. Refresh persisted memory and the bounded
+            # model context exactly once at the end of the turn.
+            yield (
+                gr.skip(), gr.skip(), messages, gr.skip(),
+                render_context(messages), render_memory(), gr.skip(), gr.skip(),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -281,17 +323,17 @@ def reset_conversation():
 
 
 def wipe_long_term():
-    memory.wipe()
+    store.wipe()
     return render_memory()
 
 
 def fill_context(messages):
     """Stuff the window with filler so you can show overflow instantly."""
     filler = []
-    for i in range(config.SHORT_TERM_MAX_TURNS):
+    for i in range(settings.SHORT_TERM_MAX_TURNS):
         filler.append({"role": "user", "content": f"[filler question #{i + 1}]"})
         filler.append({"role": "assistant", "content": f"[filler answer #{i + 1}]"})
-    messages = (messages + filler)[-config.SHORT_TERM_MAX_TURNS * 2 :]
+    messages = (messages + filler)[-settings.SHORT_TERM_MAX_TURNS * 2 :]
     return messages, render_context(messages)
 
 
@@ -300,7 +342,7 @@ def fill_context(messages):
 # ---------------------------------------------------------------------------
 with gr.Blocks(title="Local Agent Demo") as demo:
     gr.Markdown(
-        f"# Teacher's Assistant — Local Agent Demo &nbsp;·&nbsp; `{config.MODEL}`\n"
+        f"# Teacher's Assistant — Local Agent Demo &nbsp;·&nbsp; `{settings.MODEL}`\n"
         "An agent for a professor: gradebook tools over **MCP** · **short-term** vs "
         "**long-term** memory · **skills** with progressive disclosure · a "
         "**subagent** it delegates whole jobs to. 100% local, no API keys."
@@ -368,8 +410,8 @@ with gr.Blocks(title="Local Agent Demo") as demo:
     ]
     inputs = [msg_box, chatbot, messages_state, retrieval_mode, use_subagent]
 
-    send_btn.click(on_send, inputs, outputs)
-    msg_box.submit(on_send, inputs, outputs)
+    send_btn.click(on_send, inputs, outputs, stream_every=0.05)
+    msg_box.submit(on_send, inputs, outputs, stream_every=0.05)
 
     reset_btn.click(
         reset_conversation,

@@ -1,5 +1,5 @@
 """
-mcp_client.py — Plumbing. Connects our agent to the MCP server.
+client.py — Plumbing. Connects our agent to the MCP server.
 
 You can skim this file. It is the least interesting part of the demo -- it
 exists purely to bridge two worlds:
@@ -25,6 +25,8 @@ import asyncio
 import sys
 import threading
 from contextlib import AsyncExitStack
+from os import PathLike
+from pathlib import Path
 
 from mcp import StdioServerParameters, stdio_client
 from mcp.client import Client
@@ -33,8 +35,8 @@ from mcp.client import Client
 class MCPClient:
     """A synchronous wrapper around one MCP server connection."""
 
-    def __init__(self, server_script: str):
-        self.server_script = server_script
+    def __init__(self, server_path: str | PathLike[str]):
+        self.server_path = Path(server_path).expanduser().resolve()
         self.tools = []  # populated by connect()
 
         self._stack: AsyncExitStack | None = None
@@ -76,7 +78,7 @@ class MCPClient:
         # the same UV-managed environment. Avoids "works on my machine" pain.
         params = StdioServerParameters(
             command=sys.executable,
-            args=[self.server_script],
+            args=[str(self.server_path)],
         )
 
         # stdio transport: we LAUNCH the server as a subprocess and talk to it

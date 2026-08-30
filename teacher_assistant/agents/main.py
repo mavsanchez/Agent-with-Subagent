@@ -1,5 +1,5 @@
 """
-agent.py — THE AGENT LOOP. Read this file first.
+main.py — THE MAIN AGENT LOOP. Read this file first.
 
 Everything else in this project is a supporting character. This is the agent.
 
@@ -32,10 +32,10 @@ import json
 
 import ollama
 
-import config
-import memory
-import skills_loader
-import subagent
+from teacher_assistant import settings
+from teacher_assistant.agents import subagent
+from teacher_assistant.memory import store
+from teacher_assistant.skills import loader
 
 # ---------------------------------------------------------------------------
 # The agent's personality and rules.
@@ -97,7 +97,7 @@ def trim_short_term(messages: list[dict]) -> list[dict]:
     model. It is gone. That is what a context window limit actually is, and
     it's why the next section of this project exists.
     """
-    max_messages = config.SHORT_TERM_MAX_TURNS * 2  # one user + one assistant
+    max_messages = settings.SHORT_TERM_MAX_TURNS * 2  # one user + one assistant
     return messages[-max_messages:]
 
 
@@ -118,12 +118,23 @@ def trim_short_term(messages: list[dict]) -> list[dict]:
 # This IS a blunt keyword check, and that's a real tradeoff worth naming in
 # class: ask for "a note to Marcus" and it won't fire. A production system
 # would use a small classifier or embed the message against each skill
-# description (the same trick memory.py uses for recall). The lesson is the
+# description (the same trick memory/store.py uses for recall). The lesson is the
 # pattern, not the word list: when a rule really matters, enforce it in code.
 REQUEST_WORDS = (
     "draft", "write", "compose", "report", "summary", "summarize",
     "recap", "prepare", "put together",
 )
+
+# A chart request is an explicit request for an artifact. Keep this small,
+# because the model can otherwise choose a text-only statistics tool and never
+# give the UI a chance to render the image.
+CHART_REQUEST_WORDS = ("chart", "graph", "plot")
+
+
+def requests_chart(user_text: str) -> bool:
+    """Return whether the teacher explicitly asked for a chart artifact."""
+    text = user_text.lower()
+    return any(word in text for word in CHART_REQUEST_WORDS)
 
 
 def skills_on_offer(user_text: str, skills: list[dict]) -> list[dict]:
@@ -366,19 +377,19 @@ def decide(system_prompt: str, user_text: str, schema: dict) -> dict:
     )
 
     response = ollama.chat(
-        model=config.MODEL,
+        model=settings.MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": instruction},
         ],
         format=schema,
-        options={
-            "temperature": config.TEMPERATURE,
-            # Hard ceiling on the decision. It should be ~40 tokens; if the
-            # model ever runs away, we cut it off instead of hanging the demo.
-            "num_predict": config.MAX_DECISION_TOKENS,
-        },
-        keep_alive=config.KEEP_ALIVE,
+        # Hard ceiling on the decision. It should be ~40 tokens; if the model
+        # ever runs away, we cut it off instead of hanging the demo.
+        options=settings.chat_options(
+            temperature=settings.TEMPERATURE,
+            num_predict=settings.MAX_DECISION_TOKENS,
+        ),
+        keep_alive=settings.KEEP_ALIVE,
     )
 
     try:
@@ -439,7 +450,7 @@ def repair_args(system_prompt: str, user_text: str, tool) -> dict:
     missing.
     """
     response = ollama.chat(
-        model=config.MODEL,
+        model=settings.MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -449,8 +460,11 @@ def repair_args(system_prompt: str, user_text: str, tool) -> dict:
             },
         ],
         format=tool.input_schema,
-        options={"temperature": config.TEMPERATURE, "num_predict": config.MAX_DECISION_TOKENS},
-        keep_alive=config.KEEP_ALIVE,
+        options=settings.chat_options(
+            temperature=settings.TEMPERATURE,
+            num_predict=settings.MAX_DECISION_TOKENS,
+        ),
+        keep_alive=settings.KEEP_ALIVE,
     )
     try:
         return json.loads(response["message"]["content"])
@@ -476,7 +490,7 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
     # === 1. RECALL ========================================================
     # Before thinking, remember. Pull relevant durable facts out of long-term
     # memory and into the prompt.
-    memories = memory.retrieve(user_text, retrieval_mode)
+    memories = store.retrieve(user_text, retrieval_mode)
     if memories:
         yield ("trace", f"**Recall** ({retrieval_mode}): found {len(memories)} memory(s)")
         for m in memories:
@@ -500,7 +514,7 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
     # be produced -- see skills_on_offer(). When none are on offer, load_skill
     # is removed from the tool enum entirely, so it is not merely discouraged;
     # it is ungeneratable.
-    offered = skills_on_offer(user_text, skills_loader.list_skills())
+    offered = skills_on_offer(user_text, loader.list_skills())
 
     # ---- THE A/B SWITCH (the "Delegate to subagent" toggle in the GUI) ----
     # ON  -> the specialist owns check-in-email. The parent is not even shown
@@ -540,6 +554,9 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
     observations: list[tuple[str, str]] = []
     loaded_skills: list[tuple[str, str]] = []
     delegated: list[tuple[str, str]] = []
+    specialist_answer = ""
+    specialist_prompt_tokens = 0
+    direct_answer = ""
 
     # Small models LOVE to call the same tool over and over. Telling them not to
     # in the prompt does not work. So we enforce it in Python instead.
@@ -548,12 +565,29 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
     charts_shown: set[str] = set()
 
     # === 3. THE LOOP ======================================================
-    for step in range(config.MAX_TOOL_STEPS):
+    for step in range(settings.MAX_TOOL_STEPS):
         system_prompt = build_system_prompt(
             mcp.tools, memories, skills, loaded_skills, observations, history,
             subagents, delegated,
         )
         decision = decide(system_prompt, user_text, schema)
+
+        # Do not let a model routing mistake turn an explicit chart request
+        # into a text-only answer. The chart tool is still discovered from MCP
+        # at runtime; this guard only supplies a deterministic fallback for
+        # the user-visible artifact.
+        if step == 0 and requests_chart(user_text) and "chart_grades" in tool_names:
+            if decision["tool"] != "chart_grades":
+                yield (
+                    "trace",
+                    "&nbsp;&nbsp;&nbsp;&nbsp;explicit chart request detected - "
+                    "routing to `chart_grades`",
+                )
+                decision = {
+                    "reasoning": "The teacher explicitly requested a chart.",
+                    "tool": "chart_grades",
+                    "args": {"target": "class"},
+                }
 
         tool = decision["tool"]
         yield ("trace", f"**Step {step + 1}** - thinking: _{decision['reasoning'][:150]}_")
@@ -608,7 +642,7 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
             if name.lower() not in skill_names:
                 yield ("trace", f"**Step {step + 1}** - asked for unknown skill `{name}`, ignoring")
                 continue
-            body = skills_loader.load_skill(name)
+            body = loader.load_skill(name)
             loaded_skills.append((name, body))
             yield ("trace", f"**Step {step + 1}** - loaded skill `{name}` (+~{len(body) // 4} tokens)")
             continue
@@ -642,11 +676,20 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
                     # happened inside a different agent, not this one.
                     yield ("trace", f"&nbsp;&nbsp;│&nbsp;&nbsp;{payload}")
                 elif kind == "panel":
+                    specialist_prompt_tokens = payload.get(
+                        "prompt_tokens", specialist_prompt_tokens,
+                    )
                     yield ("subagent", payload)
+                elif kind == "token":
+                    # The specialist's final output is already the requested
+                    # answer, so send it straight to the same chat stream.
+                    yield ("token", payload)
                 elif kind == "result":
                     work = payload
 
-            delegated.append((spec["name"], work))
+            if work.strip():
+                delegated.append((spec["name"], work))
+                specialist_answer = work
             yield ("trace", f"**Step {step + 1}** - specialist done; handing its work to the teacher")
             # The specialist finished the job. There is nothing left to gather,
             # so stop looping and go write the reply.
@@ -678,30 +721,66 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
         observations.append((tool, result))
         yield ("trace", f"&nbsp;&nbsp;&nbsp;&nbsp;-> {result[:200]}")
 
-    # === 4. ANSWER (streaming) ===========================================
-    # Same shape as decide(): history lives in the system prompt, and the only
-    # live message is what the teacher actually just asked.
-    system_prompt = build_system_prompt(
-        mcp.tools, memories, skills, loaded_skills, observations, history,
-        subagents, delegated,
-    )
-    stream = ollama.chat(
-        model=config.MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt + ANSWER_INSTRUCTION},
-            {"role": "user", "content": user_text},
-        ],
-        stream=True,
-        keep_alive=config.KEEP_ALIVE,
-    )
+        # Raw arithmetic is already completely answered by deterministic code.
+        # Sending the number through another small-model generation risks
+        # changed digits or a fabricated interpretation of what it represents.
+        if tool == "calculate" and not result.startswith("Tool failed:"):
+            direct_answer = result.strip()
+            if direct_answer:
+                yield ("token", direct_answer)
+            yield ("trace", "&nbsp;&nbsp;&nbsp;&nbsp;calculation is complete; returning the exact result")
+            break
 
-    answer, prompt_tokens = "", 0
-    for chunk in stream:
-        piece = chunk["message"]["content"]
-        answer += piece
-        yield ("token", piece)
-        if chunk.get("done"):
-            prompt_tokens = chunk.get("prompt_eval_count", 0)
+        # A chart tool returns both the finished artifact and the plotted data
+        # needed to describe it. Re-routing after that only invites the model to
+        # request the same default chart again with a cosmetically different
+        # argument shape ({} versus {"target": "class"}).
+        if tool == "chart_grades":
+            yield ("trace", "&nbsp;&nbsp;&nbsp;&nbsp;chart and plotted data are complete; answering now")
+            break
+
+    # === 4. ANSWER (streaming) ===========================================
+    # A specialist's non-empty result was streamed directly above and is
+    # already the finished answer. Only call the parent model when there was no
+    # specialist result (including the defensive empty-result fallback).
+    answer = specialist_answer or direct_answer
+    prompt_tokens = specialist_prompt_tokens
+    if not answer:
+        # Same shape as decide(): history lives in the system prompt, and the
+        # only live message is what the teacher actually just asked.
+        # Routing is over. Omitting available-tool, skill, and specialist menus
+        # keeps the final model focused on verified observations instead of
+        # hallucinating that an uncalled tool already returned data.
+        system_prompt = build_system_prompt(
+            [], memories, [], loaded_skills, observations, history,
+            [], delegated,
+        )
+        # The long commit instruction is useful when there is gathered context
+        # to synthesize, but it over-primes Gemma to invent class data for a
+        # bare greeting. With no evidence or history, the persona plus the live
+        # user message is the clearer prompt.
+        answer_instruction = (
+            ANSWER_INSTRUCTION
+            if memories or loaded_skills or observations or history or delegated
+            else ""
+        )
+        stream = ollama.chat(
+        model=settings.MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt + answer_instruction},
+                {"role": "user", "content": user_text},
+            ],
+            stream=True,
+            options=settings.chat_options(num_predict=settings.MAX_ANSWER_TOKENS),
+        keep_alive=settings.KEEP_ALIVE,
+        )
+
+        for chunk in stream:
+            piece = chunk["message"]["content"]
+            answer += piece
+            yield ("token", piece)
+            if chunk.get("done"):
+                prompt_tokens = chunk.get("prompt_eval_count", 0)
 
     messages.append({"role": "assistant", "content": answer})
     messages = trim_short_term(messages)
@@ -718,11 +797,11 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
     # This happens AFTER the student already has their answer, so the extra
     # LLM call never makes the reply feel slow.
     yield ("trace", "**Reflect** - checking for durable facts...")
-    facts = memory.extract_facts(user_text, answer)
+    facts = store.extract_facts(user_text, answer)
     if not facts:
         yield ("trace", "&nbsp;&nbsp;&nbsp;&nbsp;nothing worth remembering (this is normal)")
     for fact in facts:
-        # remember() does the add/update/skip reconciliation -- see memory.py
-        yield ("trace", f"&nbsp;&nbsp;&nbsp;&nbsp;{memory.remember(fact)}")
+        # remember() does the add/update/skip reconciliation -- see memory/store.py
+        yield ("trace", f"&nbsp;&nbsp;&nbsp;&nbsp;{store.remember(fact)}")
 
     yield ("done", messages)

@@ -11,7 +11,7 @@ demo, honestly, it is. But it buys three things that matter in real systems:
   1. DISCOVERY. The agent never hardcodes tool names. It asks the server
      "what can you do?" at startup (list_tools) and builds its prompt from the
      answer. Add a tool here, restart, and the agent can use it -- with zero
-     changes to agent.py.
+     changes to agents/main.py.
 
   2. ISOLATION. This could be on another machine, written in TypeScript, or
      maintained by a team you've never met. The agent doesn't care.
@@ -53,7 +53,7 @@ call this tool. Write docstrings like you're writing instructions, because
 you are.
 
 RUN IT STANDALONE (to prove it's a real server):
-    uv run python course_server.py
+    uv run python teacher_assistant/mcp/course_server.py
     (it will sit there waiting for JSON-RPC on stdin -- Ctrl+C to quit)
 """
 
@@ -66,8 +66,9 @@ from mcp.server import MCPServer
 # The server's name. Shows up in client UIs.
 server = MCPServer("gradebook-tools")
 
-DATA_FILE = Path(__file__).parent / "course_data.json"
-CHARTS_DIR = Path(__file__).parent / "charts"
+MODULE_DIR = Path(__file__).resolve().parent
+DATA_FILE = (MODULE_DIR / "course_data.json").resolve()
+CHARTS_DIR = (MODULE_DIR / "charts").resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +295,7 @@ def chart_grades(target: str = "class") -> str:
         for a in assignments
     ]
 
-    CHARTS_DIR.mkdir(exist_ok=True)
+    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7, 4))
 
     student = None if target.strip().lower() in ("class", "overall", "all", "") else _find_student(data, target)
@@ -304,7 +305,7 @@ def chart_grades(target: str = "class") -> str:
     if student is None:
         ax.bar(labels, class_avgs, color="#4c72b0")
         ax.set_title(f"Class average by assignment — {data['course']}")
-        path = CHARTS_DIR / "class_averages.png"
+        path = (CHARTS_DIR / "class_averages.png").resolve()
         plotted = [f"  - {l}: class average {v:.1f}" for l, v in zip(labels, class_avgs)]
     else:
         scores = [data["students"][student]["grades"][a] for a in assignments]
@@ -314,7 +315,7 @@ def chart_grades(target: str = "class") -> str:
         ax.set_xticks(list(x), labels)
         ax.legend()
         ax.set_title(f"{student} vs class average — {data['course']}")
-        path = CHARTS_DIR / f"{student.split()[0].lower()}_vs_class.png"
+        path = (CHARTS_DIR / f"{student.split()[0].lower()}_vs_class.png").resolve()
         # Precompute the comparisons in code. A small model asked to compare 94
         # to 82.5 will sometimes get it backwards; code never does. If a
         # comparison matters, do the comparing in the tool, not the prompt.
@@ -345,7 +346,7 @@ def chart_grades(target: str = "class") -> str:
 # TOOL 7 — THE LIVE DEMO TOOL
 # ---------------------------------------------------------------------------
 # Uncomment this function during class, restart the app, and watch the agent
-# start using it immediately. You will not touch agent.py. You will not touch
+# start using it immediately. You will not touch agents/main.py. You will not touch
 # app.py. The Tools panel in the GUI will just grow another entry.
 #
 # THAT is runtime tool discovery, and it is the thing MCP is actually for.
