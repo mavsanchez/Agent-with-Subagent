@@ -34,10 +34,11 @@ from teacher_assistant.skills import loader
 # ---------------------------------------------------------------------------
 # STARTUP
 # ---------------------------------------------------------------------------
-print("Connecting to MCP server...")
+print("Connecting to MCP server and web research...")
 MCP = MCPClient(settings.MCP_SERVER_PATH)
 MCP.connect()
-print(f"  connected. Tools discovered: {[t.name for t in MCP.tools]}")
+print(f"  connected: {MCP.server_names}")
+print(f"  tools available: {[t.name for t in MCP.tools]}")
 
 
 def _warm_up():
@@ -107,13 +108,20 @@ def render_memory() -> str:
 
 
 def render_tools() -> str:
-    """What the agent discovered at runtime — nothing here is hardcoded."""
-    out = ["### Tools (discovered live over MCP)"]
+    """Show MCP-discovered and client-owned tools available to the agent."""
+    out = ["### Tools available to the agent"]
     server_label = settings.MCP_SERVER_PATH.relative_to(settings.PROJECT_ROOT).as_posix()
-    out.append(f"_Server: `{server_label}`, running as a separate process._\n")
+    out.append(
+        f"_Sources: `course-tools` MCP server ({server_label}) and "
+        "client-owned key-free web research._\n"
+    )
     for tool in MCP.tools:
         params = ", ".join(tool.input_schema.get("properties", {}).keys()) or ""
-        out.append(f"- **`{tool.name}({params})`** — {tool.description.strip().splitlines()[0]}")
+        source = MCP.tool_sources.get(tool.name, "MCP")
+        out.append(
+            f"- **`{tool.name}({params})`** _[{source}]_ — "
+            f"{tool.description.strip().splitlines()[0]}"
+        )
     out.append("- **`load_skill(name)`** — _client-side, not from MCP_")
 
     owned = subagent.owned_skills()
@@ -215,12 +223,12 @@ def render_subagent(panel: dict | None) -> str:
         # lesson anyway: the specialist's persona says "call student_report
         # BEFORE you write a single word", and student_report is the only tool it
         # has. Narrow job + narrow menu = it does the right thing. Untick the
-        # toggle and the main agent, holding six tools and a whole conversation,
+        # toggle and the main agent, holding many tools and a whole conversation,
         # will often skip the lookup and invent the grades outright.
         out.append(
             "\n> **Try it both ways:** **Reset conversation**, untick the toggle, "
             "ask again, then check the grades against the Tools panel. A general "
-            "agent juggling six tools and a conversation often loads the skill, "
+            "agent juggling many tools and a conversation often loads the skill, "
             "decides it doesn't need the lookup, and invents the numbers. A "
             "specialist with one job and one tool does not.\n>\n"
             "> Reset first, always — otherwise the old email is still in the "
@@ -345,7 +353,8 @@ with gr.Blocks(title="Local Agent Demo") as demo:
         f"# Teacher's Assistant — Local Agent Demo &nbsp;·&nbsp; `{settings.MODEL}`\n"
         "An agent for a professor: gradebook tools over **MCP** · **short-term** vs "
         "**long-term** memory · **skills** with progressive disclosure · a "
-        "**subagent** it delegates whole jobs to. 100% local, no API keys."
+        "**subagent** it delegates whole jobs to · key-free **web research** "
+        "for outside knowledge."
     )
 
     # Short-term memory really is just a Python list living in this State.

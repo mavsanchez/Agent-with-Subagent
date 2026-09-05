@@ -1,9 +1,9 @@
 # Teacher's Assistant — Local Agent Demo
 
-A small AI agent that runs entirely on your laptop. It plays the part of a
-professor's assistant: it can pull up students, crunch class stats, draw
-charts, and remember things you tell it between sessions. No API keys, no
-cloud, no cost.
+A small AI agent whose model and course data run on your laptop. It plays the
+part of a professor's assistant: it can pull up students, crunch class stats,
+draw charts, remember things you tell it between sessions, and optionally use
+key-free web research when it needs current outside knowledge.
 
 You'll build your capstone off this, so get it running before class.
 
@@ -78,6 +78,7 @@ flowchart TB
         loader["teacher_assistant/skills/loader.py<br/>discover metadata, load instructions"]
         child["teacher_assistant/agents/subagent.py<br/>isolated specialist agent loop"]
         client["teacher_assistant/mcp/client.py<br/>sync wrapper around async MCP"]
+        research["web_research.py<br/>DuckDuckGo search with Bing fallback"]
     end
 
     subgraph ollama["Ollama local service"]
@@ -88,6 +89,8 @@ flowchart TB
     subgraph toolprocess["Child process started by teacher_assistant/mcp/client.py"]
         server["teacher_assistant/mcp/course_server.py<br/>MCP tool definitions"]
     end
+
+    publicweb["Public search result pages<br/>no API key"]
 
     subgraph files["Files on disk"]
         readme["README.md<br/>human documentation"]
@@ -121,6 +124,8 @@ flowchart TB
     server -->|"read on every tool call"| data
     server -->|"write chart image"| charts
     charts -->|"path returned in generator event"| app
+    client -->|"direct Python call"| research
+    research <-->|"HTTPS"| publicweb
 
     project -.->|"install dependencies"| app
     project -.->|"install dependencies"| server
@@ -133,6 +138,7 @@ flowchart TB
     config -.-> child
     config -.-> loader
     config -.-> client
+    config -.-> research
     config -.-> setup
     ignore -.-> memories
     ignore -.-> charts
@@ -144,8 +150,8 @@ flowchart TB
     linkStyle 3 stroke:#F59E0B,stroke-width:3px;
     linkStyle 4,5,6,7 stroke:#22C55E,stroke-width:3px;
     linkStyle 8,9,10,11,12,14 stroke:#A855F7,stroke-width:3px;
-    linkStyle 13,15,16,17,18 stroke:#3B82F6,stroke-width:3px;
-    linkStyle 19,20,21,22,23,24,25,26,27,28,29,30,31,32,33 stroke:#94A3B8,stroke-width:2px;
+    linkStyle 13,15,16,17,18,19,20 stroke:#3B82F6,stroke-width:3px;
+    linkStyle 21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36 stroke:#94A3B8,stroke-width:2px;
 ```
 
 Line-color guide:
@@ -156,17 +162,20 @@ Line-color guide:
 | **Amber** | Main agent's direct chat-model call | `teacher_assistant/agents/main.py` → `gemma3:4b` |
 | **Green** | Long-term memory and embeddings | `teacher_assistant/agents/main.py` → `teacher_assistant/memory/store.py` → model/files |
 | **Purple** | Skills and delegated subagent work | Main agent → `teacher_assistant/agents/subagent.py` / `teacher_assistant/skills/loader.py` |
-| **Blue** | MCP, deterministic tools, data, and artifacts | Agent/subagent → MCP → server → JSON/PNG |
+| **Blue** | Tool calls, deterministic data, artifacts, and public-web evidence | Agent → client → MCP or web research |
 | **Gray dotted** | Setup, configuration, dependencies, and generated files | `teacher_assistant/settings.py`, `pyproject.toml`, `uv.lock`, `.gitignore`, `__pycache__` |
 
-There are three important runtime boundaries:
+There are four important runtime boundaries:
 
 1. **The main Python process** contains the UI and orchestration code. These
    modules can call each other as normal Python.
-2. **The MCP tool process** runs `teacher_assistant/mcp/course_server.py` separately. The main
-   process does not import its tool functions; it exchanges JSON-RPC messages
-   with it through stdin/stdout.
-3. **Ollama** is another local process. Python sends prompts to it through the
+2. **The MCP tool process** runs `teacher_assistant/mcp/course_server.py`
+   separately. The client discovers its course tools, then adds its own
+   `web_research` capability to the same tool menu.
+3. **Public search pages** are the network boundary. Only the search query is
+   sent to Bing or DuckDuckGo; no API key is needed, and course data and memory
+   are never sent with it.
+4. **Ollama** is another local process. Python sends prompts to it through the
    `ollama` package. The chat model writes decisions and answers; the embedding
    model turns text into vectors for semantic memory search.
 
@@ -184,9 +193,9 @@ code from top to bottom:
    `teacher_assistant/settings.py`.
 2. It creates `MCPClient` and immediately calls `MCP.connect()`.
 3. `teacher_assistant/mcp/client.py` starts an asyncio event loop on a
-   background thread, launches the resolved
-   `teacher_assistant/mcp/course_server.py` path with the same Python
-   interpreter, and asks it for its tool list.
+   background thread, launches `teacher_assistant/mcp/course_server.py` with
+   the same Python interpreter, discovers its tools, and adds the client-owned
+   `web_research` tool.
 4. `app.py` synchronously warms the embedding model and then the chat model,
    using the same bounded context as live requests. The UI opens only when the
    models are ready, so the first message does not pay the load cost.
@@ -214,8 +223,10 @@ sequenceDiagram
     participant Skill as teacher_assistant/skills/loader.py
     participant Sub as teacher_assistant/agents/subagent.py
     participant MCP as teacher_assistant/mcp/client.py
-    participant Server as teacher_assistant/mcp/course_server.py
+    participant Server as course_server.py
     participant Data as teacher_assistant/mcp/course_data.json
+    participant Research as web_research.py
+    participant Web as Bing / DuckDuckGo
 
     Teacher->>UI: Click Send
     UI->>Agent: run_turn(MCP, messages, text, mode, toggle)
@@ -227,12 +238,19 @@ sequenceDiagram
     loop Up to MAX_TOOL_STEPS
         Agent->>Ollama: Request constrained JSON decision
         Ollama-->>Agent: tool name + arguments, or none
-        alt MCP tool selected
+        alt Course MCP tool selected
             Agent->>MCP: call_tool(name, args)
             MCP->>Server: JSON-RPC request over stdio
             Server->>Data: Read gradebook if needed
             Data-->>Server: Course data
             Server-->>MCP: Exact text result or chart path
+            MCP-->>Agent: Tool observation
+        else web_research selected
+            Agent->>MCP: call_tool(web_research, args)
+            MCP->>Research: Direct Python call
+            Research->>Web: HTTPS search request
+            Web-->>Research: Current result snippets + URLs
+            Research-->>MCP: Formatted evidence
             MCP-->>Agent: Tool observation
         else load_skill selected
             Agent->>Skill: load_skill(name)
@@ -278,12 +296,14 @@ The main loop in `teacher_assistant.agents.main.run_turn()` has five phases:
 
 ### Repository map: what every file does and who first uses it
 
-Only the two runnable Python files stay at the repository root. Supporting
-code is grouped by its role under one application package:
+The two runnable Python files and the small key-free research helper stay at
+the repository root. Other supporting code is grouped by role under one
+application package:
 
 ```text
 app.py
 setup_check.py
+web_research.py
 teacher_assistant/
 ├── __init__.py
 ├── settings.py
@@ -324,6 +344,7 @@ their assets live (`mcp`), and where reusable procedures live (`skills`).
 | [.gitignore](.gitignore) | Keeps environments, caches, memories, and generated charts out of Git. | Git reads it; Python does not. |
 | [setup_check.py](setup_check.py) | Checks Python, packages, Ollama, configured models, and MCP tool discovery. | Run with `uv run python setup_check.py`. |
 | [app.py](app.py) | Main entry point. Builds the Gradio UI, connects MCP, wires buttons, streams generator events, and renders the teaching panels. | Run with `uv run python app.py`; `on_send()` begins a turn. |
+| [web_research.py](web_research.py) | Key-free public-web search using DuckDuckGo with a Bing fallback, result deduplication, and compact URL-bearing output. | `MCPClient.call_tool("web_research", ...)` invokes it directly. |
 | [teacher_assistant/settings.py](teacher_assistant/settings.py) | Central settings: model names, context size, thresholds, loop limits, and resolved project paths. | Imported by the root entry points and role packages. |
 | [teacher_assistant/agents/main.py](teacher_assistant/agents/main.py) | Main orchestration loop. Builds prompts and schemas, recalls memory, chooses actions, executes tools/skills/delegation, streams the answer, and reflects afterward. | `app.on_send()` calls `run_turn()`. |
 | [teacher_assistant/agents/subagent.py](teacher_assistant/agents/subagent.py) | Defines specialist configurations and runs an isolated decide/act/answer loop with a restricted tool list. | Listed by `app.render_tools()`; executed for a `delegate` decision. |
@@ -332,7 +353,7 @@ their assets live (`mcp`), and where reusable procedures live (`skills`).
 | [teacher_assistant/skills/loader.py](teacher_assistant/skills/loader.py) | Finds skill files, reads their small frontmatter summaries, and loads a full procedure only when requested. | `app.render_tools()` lists metadata at startup; an agent later calls `load_skill()`. |
 | [teacher_assistant/skills/weekly-report/SKILL.md](teacher_assistant/skills/weekly-report/SKILL.md) | Procedure for producing a whole-class weekly report. | Its metadata is discovered at startup; its body loads only when requested. |
 | [teacher_assistant/skills/check-in-email/SKILL.md](teacher_assistant/skills/check-in-email/SKILL.md) | Procedure for drafting one student's check-in email. | Normally loaded by the subagent; the main agent can load it when delegation is disabled. |
-| [teacher_assistant/mcp/client.py](teacher_assistant/mcp/client.py) | Bridges synchronous agent code to the asynchronous MCP SDK. Owns the background event loop, server subprocess, discovery, and tool calls. | `app.py` creates `MCPClient` and calls `connect()` during startup. |
+| [teacher_assistant/mcp/client.py](teacher_assistant/mcp/client.py) | Bridges synchronous agent code to the asynchronous course MCP and exposes key-free web research through the same tool interface. | `app.py` creates `MCPClient` and calls `connect()` during startup. |
 | [teacher_assistant/mcp/course_server.py](teacher_assistant/mcp/course_server.py) | Separate MCP server containing deterministic tools for math, reports, rosters, statistics, deadlines, and charts. | Launched as a child process by `MCPClient.connect()`; `server.run()` waits for JSON-RPC requests. |
 | [teacher_assistant/mcp/course_data.json](teacher_assistant/mcp/course_data.json) | Gradebook source of truth. The LLM never receives the file directly. | `_load_data()` reads it inside each relevant MCP tool call. |
 | `teacher_assistant/mcp/charts/` | Runtime output directory for PNGs created by `chart_grades()`. | Written by the MCP server; returned through the generator to Gradio. |
@@ -470,8 +491,8 @@ point:
 
 | | main agent | `email-writer` |
 |---|---|---|
-| context | the whole conversation, memory, six tools | **empty at birth** |
-| tools | all six | `student_report`, and nothing else |
+| context | the whole conversation, memory, six course tools, and web research | **empty at birth** |
+| tools | all six course tools plus `web_research` | `student_report`, and nothing else |
 | skill | loads on demand | owns `check-in-email` outright |
 
 **When is a job worth delegating?** One test: *big input, small output, and the
@@ -496,7 +517,7 @@ grades in the two emails against the Tools panel.
 
 - **On:** the specialist calls `student_report` first — because its persona
   says to and because it's the only tool it has — and the grades are right.
-- **Off:** the main agent, holding six tools and a whole conversation, will
+- **Off:** the main agent, holding all course tools, web research, and a whole conversation, will
   often load the skill, decide "no tool needed", and **invent the grades**.
   In our runs it reported another student's scores and praised attendance of
   65% as good.
@@ -522,6 +543,7 @@ its own.
 | `connection refused` at startup | Ollama isn't running. Start the app, or run `ollama serve`. |
 | `model not found` | Pull the model named in `teacher_assistant/settings.py`, currently `ollama pull gemma3:4b`. |
 | Replies crawl | Normal on CPU. Use a smaller `MODEL` in `teacher_assistant/settings.py`. |
+| `Web search failed` | Public search pages sometimes block automated requests. Retry once; the client automatically tries Bing when DuckDuckGo fails. |
 | It answered with numbers but called no tool | It made them up. Small models do this — open the Trace tab and catch it in the act. This is why evals exist. |
 | Memory panel stays empty | Only durable facts get saved, not questions. Tell it something worth writing down. |
 | Want a clean slate | Hit **Wipe long-term memory**, or delete `teacher_assistant/memory/memories.json`. |

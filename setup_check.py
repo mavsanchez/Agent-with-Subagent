@@ -38,12 +38,14 @@ if sys.version_info < (3, 10):
 def _packages():
     missing = [
         name
-        for name in ("ollama", "mcp", "gradio", "numpy", "matplotlib")
+        for name in (
+            "ollama", "mcp", "gradio", "numpy", "matplotlib", "requests", "bs4",
+        )
         if importlib.util.find_spec(name) is None
     ]
     if missing:
         raise RuntimeError("missing: " + ", ".join(missing))
-    return "ollama, mcp, gradio, numpy, matplotlib"
+    return "ollama, mcp, gradio, numpy, matplotlib, requests, beautifulsoup4"
 
 
 have_packages = check("Python packages", _packages, "uv sync")
@@ -96,25 +98,28 @@ if server_up:
     )
 
 
-# --- 4. does the MCP server actually start and expose tools? ---------------
+# --- 4. does MCP start and does the client expose all capabilities? --------
 def _mcp_server():
     from teacher_assistant.mcp.client import MCPClient
 
     client = MCPClient(settings.MCP_SERVER_PATH)
-    client.connect()
-    names = [t.name for t in client.tools]
-    print('MCP tools',names)
-    client.close()
+    try:
+        client.connect()
+        names = [t.name for t in client.tools]
+    finally:
+        client.close()
     if not names:
-        raise RuntimeError("server started but advertised no tools")
+        raise RuntimeError("servers started but advertised no tools")
+    if settings.WEB_RESEARCH_TOOL not in names:
+        raise RuntimeError("client did not expose web_research")
     return ", ".join(names)
 
 
 if server_up:
     check(
-        "MCP server",
+        "MCP and web-research tools",
         _mcp_server,
-        "Check teacher_assistant/mcp/course_server.py for syntax errors",
+        "Check teacher_assistant/mcp/client.py and course_server.py for errors",
     )
 
 

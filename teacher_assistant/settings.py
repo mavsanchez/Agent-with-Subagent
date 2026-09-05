@@ -23,6 +23,15 @@ MEMORY_PATH = (
 SKILLS_PATH = (PROJECT_ROOT / "teacher_assistant" / "skills").resolve()
 
 # ---------------------------------------------------------------------------
+# KEY-FREE WEB RESEARCH
+# ---------------------------------------------------------------------------
+# MCPClient exposes this local capability beside the tools discovered from the
+# course MCP server. It searches public result pages and requires no API key.
+WEB_RESEARCH_TOOL = "web_research"
+WEB_SEARCH_RESULT_COUNT = 5
+WEB_RESEARCH_TIMEOUT_SECONDS = 15
+
+# ---------------------------------------------------------------------------
 # MODELS
 # ---------------------------------------------------------------------------
 # The "brain". Must be pulled first:  ollama pull gemma3:4b
@@ -31,14 +40,15 @@ SKILLS_PATH = (PROJECT_ROOT / "teacher_assistant" / "skills").resolve()
 #   ollama pull gemma3:1b     -> MODEL = "gemma3:1b"     (fast, dumber)
 #   ollama pull qwen3:4b      -> MODEL = "qwen3:4b"      (better at tools)
 # Nothing else in the codebase needs to change.
-MODEL = "gemma3:4b"
+MODEL = "gpt-oss:20b"
+# MODEL = "qwen3.8:27b"
 # MODEL = "nemotron-3.5-lightning"
 
 # Keep every chat call inside a modest shared context window so Ollama does not
 # allocate the model's much larger default context. Final prose is capped
 # separately from the short, structured routing decisions below.
-MODEL_CONTEXT_TOKENS = 8192
-MAX_ANSWER_TOKENS = 384
+MODEL_CONTEXT_TOKENS = 32764
+MAX_ANSWER_TOKENS = 1536
 
 
 def chat_options(**overrides) -> dict:
@@ -71,7 +81,7 @@ TEMPERATURE = 0.0
 # messages get dropped before we send them to the model.
 #
 # Real systems set this to hundreds. The failure is the same, just later.
-SHORT_TERM_MAX_TURNS = 6
+SHORT_TERM_MAX_TURNS = 500
 
 
 # How many remembered facts get injected into the prompt each turn.

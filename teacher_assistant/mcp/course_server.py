@@ -355,37 +355,37 @@ def chart_grades(target: str = "class") -> str:
 # Do NOT include this paragraph in the selection.
 
 # >>>>>>>>>> UNCOMMENT FROM HERE >>>>>>>>>>
-# @server.tool()
-# def find_at_risk() -> str:
-#     """List students who may be at risk, with the evidence: course average
-#     below 70, attendance below 80%, or a grade trend that is falling.
-#
-#     Use this when the teacher asks who is struggling, who is falling behind,
-#     who needs a check-in, or who they should be worried about. Never guess
-#     at this yourself -- this tool applies exact thresholds to every student.
-#     """
-#     data = _load_data()
-#     flagged = []
-#     for name, rec in data["students"].items():
-#         scores = list(rec["grades"].values())
-#         avg = sum(scores) / len(scores)
-#         reasons = []
-#         if avg < 70:
-#             reasons.append(f"average {avg:.1f}")
-#         if rec["attendance_pct"] < 80:
-#             reasons.append(f"attendance {rec['attendance_pct']}%")
-#         # "Trend" = second half of the term vs first half, 12+ points down.
-#         half = len(scores) // 2
-#         drop = sum(scores[:half]) / half - sum(scores[half:]) / (len(scores) - half)
-#         if drop >= 12:
-#             reasons.append(f"scores falling (down {drop:.0f} pts)")
-#         if reasons:
-#             flagged.append(f"  - {name}: {', '.join(reasons)}")
-#
-#     if not flagged:
-#         return "No students currently meet the at-risk criteria."
-#     return "At-risk students (avg < 70, attendance < 80%, or falling scores):\n" + "\n".join(flagged)
-# <<<<<<<<<< TO HERE <<<<<<<<<<
+@server.tool()
+def find_at_risk() -> str:
+    """List students who may be at risk, with the evidence: course average
+    below 70, attendance below 80%, or a grade trend that is falling.
+
+    Use this when the teacher asks who is struggling, who is falling behind,
+    who needs a check-in, or who they should be worried about. Never guess
+    at this yourself -- this tool applies exact thresholds to every student.
+    """
+    data = _load_data()
+    flagged = []
+    for name, rec in data["students"].items():
+        scores = list(rec["grades"].values())
+        avg = sum(scores) / len(scores)
+        reasons = []
+        if avg < 70:
+            reasons.append(f"average {avg:.1f}")
+        if rec["attendance_pct"] < 80:
+            reasons.append(f"attendance {rec['attendance_pct']}%")
+        # "Trend" = second half of the term vs first half, 12+ points down.
+        half = len(scores) // 2
+        drop = sum(scores[:half]) / half - sum(scores[half:]) / (len(scores) - half)
+        if drop >= 12:
+            reasons.append(f"scores falling (down {drop:.0f} pts)")
+        if reasons:
+            flagged.append(f"  - {name}: {', '.join(reasons)}")
+
+    if not flagged:
+        return "No students currently meet the at-risk criteria."
+    return "At-risk students (avg < 70, attendance < 80%, or falling scores):\n" + "\n".join(flagged)
+#<<<<<<<<<< TO HERE <<<<<<<<<<
 
 
 if __name__ == "__main__":
