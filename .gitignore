@@ -1,8 +1,12 @@
 __pycache__
 *.pyc
 .venv/
+.uv-cache/
 venv/
 env/
+.env
+.env.*
+!.env.example
 .gradio/
 .DS_Store
 .idea/

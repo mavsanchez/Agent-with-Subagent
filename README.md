@@ -1,6 +1,7 @@
-# Teacher's Assistant — Local Agent Demo
+# Teacher's Assistant — DGX-Backed Agent Demo
 
-A small AI agent whose model and course data run on your laptop. It plays the
+A small AI agent whose course data runs locally and whose model is served by
+LiteLLM on an NVIDIA DGX Spark. It plays the
 part of a professor's assistant: it can pull up students, crunch class stats,
 draw charts, remember things you tell it between sessions, and optionally use
 key-free web research when it needs current outside knowledge.
@@ -9,14 +10,10 @@ You'll build your capstone off this, so get it running before class.
 
 ## Setup — do this BEFORE class
 
-The model downloads are about 4.5 GB total. Classroom wifi will not save you.
+**1. Confirm that LiteLLM on `dgx-ramona` exposes the `agent` model alias and
+that your computer can resolve and reach the host.** The request path is:
 
-**1. Install [Ollama](https://ollama.com/download)**, then pull the two models:
-
-```bash
-ollama pull gemma3:4b
-ollama pull bge-m3
-```
+> Teacher Assistant → LiteLLM on `dgx-ramona:4000` → `agent` → vLLM → local DGX model
 
 **2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if
 you do not already have it, then clone this repo and create its environment:**
@@ -31,7 +28,23 @@ uv sync
 UV creates and manages the local `.venv` automatically. You do not need to
 activate it manually; `uv run` uses the project environment below.
 
-**3. Check everything:**
+**3. Create your local environment file and add your LiteLLM API key:**
+
+```powershell
+Copy-Item .env.example .env
+```
+
+```dotenv
+LLM_BASE_URL=http://dgx-ramona:4000/v1
+LLM_MODEL=agent
+LLM_API_KEY=<your-LiteLLM-API-key>
+```
+
+Never commit `.env`; only `.env.example` belongs in the repository. You can
+also set these as process or system environment variables instead. Environment
+variables take precedence over values loaded from `.env`.
+
+**4. Check everything:**
 
 ```bash
 uv run python setup_check.py
@@ -39,7 +52,7 @@ uv run python setup_check.py
 
 All green means you're ready. Anything red prints the exact command to fix it.
 
-**4. Run it:**
+**5. Run it:**
 
 ```bash
 uv run python app.py
@@ -48,15 +61,15 @@ uv run python app.py
 Your browser opens to `http://127.0.0.1:7860`. Ask it "How is Sam Rivera
 doing?" and watch the Trace tab while it answers.
 
-**Slow machine?** Open `teacher_assistant/settings.py` and switch `MODEL` to `gemma3:1b`
-(pull it first). Everything still works, the answers are just less sharp.
+To use another LiteLLM route later, change `LLM_BASE_URL` or `LLM_MODEL` in the
+environment; no application-code change is needed.
 
 ## Architecture — how the repository fits together
 
 The shortest useful description is:
 
 > `app.py` receives a message, `teacher_assistant/agents/main.py` decides what information it needs,
-> normal Python code performs the requested work, and Ollama turns the verified
+> normal Python code performs the requested work, and LiteLLM on the DGX turns the verified
 > results into a natural-language answer.
 
 The LLM does **not** directly run Python functions or open the gradebook. It
@@ -81,9 +94,8 @@ flowchart TB
         research["web_research.py<br/>DuckDuckGo search with Bing fallback"]
     end
 
-    subgraph ollama["Ollama local service"]
-        chatmodel["gemma3:4b<br/>decisions, answers, memory judgments"]
-        embedmodel["bge-m3<br/>text → embedding vectors"]
+    subgraph dgx["NVIDIA DGX Spark — dgx-ramona"]
+        llmbackend["LiteLLM :4000/v1 → alias agent → vLLM<br/>local DGX model for all semantic work"]
     end
 
     subgraph toolprocess["Child process started by teacher_assistant/mcp/client.py"]
@@ -98,7 +110,7 @@ flowchart TB
         setup["setup_check.py<br/>preflight entry point"]
         config["teacher_assistant/settings.py<br/>all runtime settings and resolved paths"]
         data["teacher_assistant/mcp/course_data.json<br/>gradebook source of truth"]
-        memories["teacher_assistant/memory/memories.json<br/>durable facts + embeddings"]
+        memories["teacher_assistant/memory/memories.json<br/>durable facts"]
         skills["teacher_assistant/skills/*/SKILL.md<br/>procedures loaded on demand"]
         charts["teacher_assistant/mcp/charts/*.png<br/>generated artifacts"]
         ignore[".gitignore<br/>excludes runtime state"]
@@ -108,15 +120,14 @@ flowchart TB
     teacher -->|"send message / see updates"| app
     app <--> state
     app -->|"on_send → run_turn"| agent
-    agent -->|"decide and stream answer"| chatmodel
+    agent -->|"OpenAI-compatible requests"| llmbackend
     agent -->|"retrieve / extract / remember"| memory
     memory <--> memories
-    memory -->|"embed text"| embedmodel
-    memory -->|"extract or reconcile facts"| chatmodel
+    memory -->|"embed, extract, reconcile"| llmbackend
     agent -->|"list or load a skill"| loader
     loader --> skills
     agent -->|"delegate a whole job"| child
-    child -->|"its own decisions and answer"| chatmodel
+    child -->|"its own decisions and answer"| llmbackend
     child -->|"load its owned procedure"| loader
     agent -->|"call_tool"| client
     child -->|"restricted call_tool"| client
@@ -129,8 +140,8 @@ flowchart TB
 
     project -.->|"install dependencies"| app
     project -.->|"install dependencies"| server
-    setup -.->|"check models"| chatmodel
-    setup -.->|"check models"| embedmodel
+    setup -.->|"check chat route"| llmbackend
+    config -.->|"endpoint + model alias"| llmbackend
     setup -.->|"test discovery"| client
     config -.-> app
     config -.-> agent
@@ -159,8 +170,8 @@ Line-color guide:
 | Color | Connection type | Example path |
 |---|---|---|
 | **Cyan** | User interface and event flow | Teacher → `app.py` → `teacher_assistant/agents/main.py` |
-| **Amber** | Main agent's direct chat-model call | `teacher_assistant/agents/main.py` → `gemma3:4b` |
-| **Green** | Long-term memory and embeddings | `teacher_assistant/agents/main.py` → `teacher_assistant/memory/store.py` → model/files |
+| **Amber** | Main agent's direct chat-model call | `teacher_assistant/agents/main.py` → configured chat model |
+| **Green** | Long-term memory and semantic scoring | `teacher_assistant/agents/main.py` → `teacher_assistant/memory/store.py` → model/files |
 | **Purple** | Skills and delegated subagent work | Main agent → `teacher_assistant/agents/subagent.py` / `teacher_assistant/skills/loader.py` |
 | **Blue** | Tool calls, deterministic data, artifacts, and public-web evidence | Agent → client → MCP or web research |
 | **Gray dotted** | Setup, configuration, dependencies, and generated files | `teacher_assistant/settings.py`, `pyproject.toml`, `uv.lock`, `.gitignore`, `__pycache__` |
@@ -175,9 +186,10 @@ There are four important runtime boundaries:
 3. **Public search pages** are the network boundary. Only the search query is
    sent to Bing or DuckDuckGo; no API key is needed, and course data and memory
    are never sent with it.
-4. **Ollama** is another local process. Python sends prompts to it through the
-   `ollama` package. The chat model writes decisions and answers; the embedding
-   model turns text into vectors for semantic memory search.
+4. **LiteLLM on the DGX Spark** is the model-service boundary. Python uses the
+   official OpenAI client against `LLM_BASE_URL`; LiteLLM resolves `LLM_MODEL`
+   and routes chat, structured-output, streaming, and semantic-memory scoring
+   to the local model runtime. No alternate LLM backend is configured.
 
 The application code lives below the `teacher_assistant` umbrella package.
 That lets the repository teach MCP with a plainly named `teacher_assistant.mcp`
@@ -196,9 +208,9 @@ code from top to bottom:
    background thread, launches `teacher_assistant/mcp/course_server.py` with
    the same Python interpreter, discovers its tools, and adds the client-owned
    `web_research` tool.
-4. `app.py` synchronously warms the embedding model and then the chat model,
-   using the same bounded context as live requests. The UI opens only when the
-   models are ready, so the first message does not pay the load cost.
+4. `app.py` checks the configured chat route through LiteLLM.
+   Failures name the configured endpoint, while the UI still opens so the
+   configuration can be corrected without a Python crash at import time.
 5. The Gradio components and callback wiring are created.
 6. The `if __name__ == "__main__"` block calls `demo.launch()`, which opens the
    local web application.
@@ -219,7 +231,7 @@ sequenceDiagram
     participant UI as app.py / Gradio
     participant Agent as teacher_assistant/agents/main.py
     participant Memory as teacher_assistant/memory/store.py
-    participant Ollama as Ollama
+    participant LiteLLM as LiteLLM / DGX Spark
     participant Skill as teacher_assistant/skills/loader.py
     participant Sub as teacher_assistant/agents/subagent.py
     participant MCP as teacher_assistant/mcp/client.py
@@ -231,13 +243,13 @@ sequenceDiagram
     Teacher->>UI: Click Send
     UI->>Agent: run_turn(MCP, messages, text, mode, toggle)
     Agent->>Memory: retrieve(text, mode)
-    Memory->>Ollama: Embed query for semantic search
+    Memory->>LiteLLM: Embed query for semantic search
     Memory-->>Agent: Relevant durable facts
     Agent->>Agent: Append message and trim short-term history
 
     loop Up to MAX_TOOL_STEPS
-        Agent->>Ollama: Request constrained JSON decision
-        Ollama-->>Agent: tool name + arguments, or none
+        Agent->>LiteLLM: Request constrained JSON decision
+        LiteLLM-->>Agent: tool name + arguments, or none
         alt Course MCP tool selected
             Agent->>MCP: call_tool(name, args)
             MCP->>Server: JSON-RPC request over stdio
@@ -259,7 +271,7 @@ sequenceDiagram
             Agent->>Sub: run(spec, task, recalled-memory briefing)
             Sub->>Skill: Load owned skill
             Sub->>MCP: Call only its allowed tools
-            Sub->>Ollama: Produce specialist result
+            Sub->>LiteLLM: Produce specialist result
             Sub-->>Agent: Finished work only
         else none selected
             Agent->>Agent: Leave the action loop
@@ -269,13 +281,13 @@ sequenceDiagram
     alt Specialist or deterministic tool returned a finished answer
         Agent-->>UI: Forward finished answer tokens directly
     else Main agent must write the answer
-        Agent->>Ollama: Stream final answer with gathered context
-        Ollama-->>Agent: Answer tokens
+        Agent->>LiteLLM: Stream final answer with gathered context
+        LiteLLM-->>Agent: Answer tokens
     end
     Agent-->>UI: token, trace, chart, subagent, and stats events
     UI-->>Teacher: Incremental UI updates
     Agent->>Memory: extract_facts(user message, answer)
-    Memory->>Ollama: Decide whether facts are durable
+    Memory->>LiteLLM: Decide whether facts are durable
     Memory->>Memory: Add, update, or skip each fact
     Memory-->>Agent: Updated teacher_assistant/memory/memories.json
     Agent-->>UI: done + trimmed message list
@@ -290,7 +302,7 @@ The main loop in `teacher_assistant.agents.main.run_turn()` has five phases:
    server tool, load a skill, delegate, or stop. Tool results are added to the
    next prompt, then the loop repeats.
 4. **Answer:** return already-finished specialist or arithmetic output directly;
-   otherwise make one normal Ollama call using the verified results.
+   otherwise make one normal LiteLLM call using the verified results.
 5. **Reflect:** after the answer is visible, extract durable facts and save
    them for future conversations.
 
@@ -342,14 +354,15 @@ their assets live (`mcp`), and where reusable procedures live (`skills`).
 | [pyproject.toml](pyproject.toml) | Declares the Python project metadata and runtime dependencies. | `uv sync`, before runtime. |
 | [uv.lock](uv.lock) | Pins the resolved dependency versions for repeatable environments. | Read automatically by `uv sync`. |
 | [.gitignore](.gitignore) | Keeps environments, caches, memories, and generated charts out of Git. | Git reads it; Python does not. |
-| [setup_check.py](setup_check.py) | Checks Python, packages, Ollama, configured models, and MCP tool discovery. | Run with `uv run python setup_check.py`. |
+| [setup_check.py](setup_check.py) | Checks Python, packages, the LiteLLM chat route, configuration, and MCP tool discovery. | Run with `uv run python setup_check.py`. |
 | [app.py](app.py) | Main entry point. Builds the Gradio UI, connects MCP, wires buttons, streams generator events, and renders the teaching panels. | Run with `uv run python app.py`; `on_send()` begins a turn. |
 | [web_research.py](web_research.py) | Key-free public-web search using DuckDuckGo with a Bing fallback, result deduplication, and compact URL-bearing output. | `MCPClient.call_tool("web_research", ...)` invokes it directly. |
-| [teacher_assistant/settings.py](teacher_assistant/settings.py) | Central settings: model names, context size, thresholds, loop limits, and resolved project paths. | Imported by the root entry points and role packages. |
+| [teacher_assistant/settings.py](teacher_assistant/settings.py) | Central settings: LiteLLM environment, thresholds, loop limits, and resolved project paths. | Imported by the root entry points and role packages. |
+| [teacher_assistant/llm.py](teacher_assistant/llm.py) | Configures the OpenAI client for LiteLLM and normalizes chat, streaming, structured output, and endpoint-aware errors. | Used by startup, both agent loops, and memory. |
 | [teacher_assistant/agents/main.py](teacher_assistant/agents/main.py) | Main orchestration loop. Builds prompts and schemas, recalls memory, chooses actions, executes tools/skills/delegation, streams the answer, and reflects afterward. | `app.on_send()` calls `run_turn()`. |
 | [teacher_assistant/agents/subagent.py](teacher_assistant/agents/subagent.py) | Defines specialist configurations and runs an isolated decide/act/answer loop with a restricted tool list. | Listed by `app.render_tools()`; executed for a `delegate` decision. |
-| [teacher_assistant/memory/store.py](teacher_assistant/memory/store.py) | Long-term-memory service. Loads/saves JSON, creates embeddings, retrieves relevant facts, and reconciles updates. | The UI reads it at startup; `run_turn()` calls `retrieve()` at the start of every turn. |
-| [teacher_assistant/memory/memories.json](teacher_assistant/memory/memories.json) | Runtime database of durable fact text and embedding vectors. It may be empty and is intentionally ignored by Git. | Read by `store.load()`; written by `store.remember()` after a turn. |
+| [teacher_assistant/memory/store.py](teacher_assistant/memory/store.py) | Long-term-memory service. Loads/saves JSON, scores semantic relevance through `agent`, retrieves relevant facts, and reconciles updates. | The UI reads it at startup; `run_turn()` calls `retrieve()` at the start of every turn. |
+| [teacher_assistant/memory/memories.json](teacher_assistant/memory/memories.json) | Runtime database of durable fact text. It may be empty and is intentionally ignored by Git. | Read by `store.load()`; written by `store.remember()` after a turn. |
 | [teacher_assistant/skills/loader.py](teacher_assistant/skills/loader.py) | Finds skill files, reads their small frontmatter summaries, and loads a full procedure only when requested. | `app.render_tools()` lists metadata at startup; an agent later calls `load_skill()`. |
 | [teacher_assistant/skills/weekly-report/SKILL.md](teacher_assistant/skills/weekly-report/SKILL.md) | Procedure for producing a whole-class weekly report. | Its metadata is discovered at startup; its body loads only when requested. |
 | [teacher_assistant/skills/check-in-email/SKILL.md](teacher_assistant/skills/check-in-email/SKILL.md) | Procedure for drafting one student's check-in email. | Normally loaded by the subagent; the main agent can load it when delegation is disabled. |
@@ -379,12 +392,11 @@ longer sent to the model.
 | Subagent panel/context | One delegated job | `teacher_assistant/agents/subagent.py` + `app.py` | Isolates specialist instructions and tool results; only finished work returns to the parent. |
 | Gradebook | Until the JSON file changes | `teacher_assistant/mcp/course_data.json` through `teacher_assistant/mcp/course_server.py` | Keeps authoritative course data outside the LLM. |
 
-An embedding is meaningful only in the vector space of the model that created
-it. If `EMBED_MODEL` changes, `teacher_assistant/memory/store.py` detects
-incompatible stored vectors, re-embeds the fact text, and updates
-`teacher_assistant/memory/memories.json`. The first semantic lookup
-after a model change can therefore be slower; later lookups reuse the migrated
-vectors.
+Semantic retrieval sends the query and saved fact text to the configured
+`LLM_MODEL` for schema-constrained relevance scores. This works with the
+chat-only `agent` alias currently exposed by LiteLLM; it does not call
+`/v1/embeddings`. Older saved vector fields are ignored and removed the next
+time the memory file is written.
 
 ### A Python detail that explains “where it is called”
 
@@ -473,8 +485,8 @@ those in that order.
 5. Tell it `Priya has an extended-time accommodation for exams.` Hit
    **Reset conversation**, then ask `Anything I should keep in mind for the
    final?` It remembers — from disk, not from the chat. Now flip retrieval
-   to `keyword` and ask again: nothing. That difference is why embeddings
-   exist.
+   to `keyword` and ask again: nothing. That difference shows literal matching
+   versus model-scored meaning.
 6. Hit **Fill context window**, then ask about something from earlier in the
    chat. Gone. That's short-term memory overflowing in real time.
 7. `Draft a check-in email to Marcus.` — the agent doesn't write it. It calls
@@ -540,9 +552,10 @@ its own.
 
 | Symptom | Fix |
 |---|---|
-| `connection refused` at startup | Ollama isn't running. Start the app, or run `ollama serve`. |
-| `model not found` | Pull the model named in `teacher_assistant/settings.py`, currently `ollama pull gemma3:4b`. |
-| Replies crawl | Normal on CPU. Use a smaller `MODEL` in `teacher_assistant/settings.py`. |
+| LLM connection failure | Confirm `LLM_BASE_URL`, DNS for `dgx-ramona`, port `4000`, and LiteLLM availability. The error includes the configured endpoint. |
+| Authentication failure | Set `LLM_API_KEY` to a valid LiteLLM key; do not put the key in source code. |
+| Model not found | Confirm LiteLLM exposes the alias named by `LLM_MODEL` (default: `agent`). |
+| Replies crawl | Check the DGX/vLLM route and model load; the Teacher Assistant does not run a local fallback. |
 | `Web search failed` | Public search pages sometimes block automated requests. Retry once; the client automatically tries Bing when DuckDuckGo fails. |
 | It answered with numbers but called no tool | It made them up. Small models do this — open the Trace tab and catch it in the act. This is why evals exist. |
 | Memory panel stays empty | Only durable facts get saved, not questions. Tell it something worth writing down. |

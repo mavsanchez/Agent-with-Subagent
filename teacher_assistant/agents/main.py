@@ -15,8 +15,7 @@ abstractions; here it's spelled out so you can watch it run.
 
 WHY TWO LLM CALLS PER STEP?
 ---------------------------
-gemma3:4b was never trained for function calling -- Ollama won't even accept a
-`tools=` parameter for it. So we split the job:
+Some local chat models are not trained for function calling. So we split the job:
 
     DECIDE  -> constrained JSON output. Tiny, fast, deterministic. Cannot
                hallucinate a tool name, because the schema's `enum` makes
@@ -31,9 +30,7 @@ parsed. There is no magic underneath the frameworks either.
 import json
 import re
 
-import ollama
-
-from teacher_assistant import settings
+from teacher_assistant import llm, settings
 from teacher_assistant.agents import subagent
 from teacher_assistant.memory import store
 from teacher_assistant.skills import loader
@@ -436,24 +433,21 @@ def decide(system_prompt: str, user_text: str, schema: dict) -> dict:
         "Keep `reasoning` to one short sentence."
     )
 
-    response = ollama.chat(
-        model=settings.MODEL,
+    response = llm.chat(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": instruction},
         ],
-        format=schema,
+        response_schema=schema,
+        schema_name="agent_decision",
         # Hard ceiling on the decision. It should be ~40 tokens; if the model
         # ever runs away, we cut it off instead of hanging the demo.
-        options=settings.chat_options(
-            temperature=settings.TEMPERATURE,
-            num_predict=settings.MAX_DECISION_TOKENS,
-        ),
-        keep_alive=settings.KEEP_ALIVE,
+        temperature=settings.TEMPERATURE,
+        max_tokens=settings.MAX_DECISION_TOKENS,
     )
 
     try:
-        decision = json.loads(response["message"]["content"])
+        decision = json.loads(response.content)
     except json.JSONDecodeError:
         # Should be impossible with constrained decoding, but never trust a
         # model's output without a guard around it.
@@ -509,8 +503,7 @@ def repair_args(system_prompt: str, user_text: str, tool) -> dict:
     required. Hand that to the model as a grammar and the argument cannot be
     missing.
     """
-    response = ollama.chat(
-        model=settings.MODEL,
+    response = llm.chat(
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -519,15 +512,13 @@ def repair_args(system_prompt: str, user_text: str, tool) -> dict:
                 f"`{tool.name}` to answer the message above.",
             },
         ],
-        format=tool.input_schema,
-        options=settings.chat_options(
-            temperature=settings.TEMPERATURE,
-            num_predict=settings.MAX_DECISION_TOKENS,
-        ),
-        keep_alive=settings.KEEP_ALIVE,
+        response_schema=tool.input_schema,
+        schema_name=f"{tool.name}_arguments",
+        temperature=settings.TEMPERATURE,
+        max_tokens=settings.MAX_DECISION_TOKENS,
     )
     try:
-        return json.loads(response["message"]["content"])
+        return json.loads(response.content)
     except json.JSONDecodeError:
         return {}
 
@@ -831,7 +822,7 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
             [], delegated,
         )
         # The long commit instruction is useful when there is gathered context
-        # to synthesize, but it over-primes Gemma to invent class data for a
+        # to synthesize, but it can over-prime a model to invent class data for a
         # bare greeting. With no evidence or history, the persona plus the live
         # user message is the clearer prompt.
         answer_instruction = (
@@ -839,23 +830,20 @@ def run_turn(mcp, messages: list[dict], user_text: str, retrieval_mode: str, use
             if memories or loaded_skills or observations or history or delegated
             else ""
         )
-        stream = ollama.chat(
-        model=settings.MODEL,
+        stream = llm.stream_chat(
             messages=[
                 {"role": "system", "content": system_prompt + answer_instruction},
                 {"role": "user", "content": user_text},
             ],
-            stream=True,
-            options=settings.chat_options(num_predict=settings.MAX_ANSWER_TOKENS),
-        keep_alive=settings.KEEP_ALIVE,
+            max_tokens=settings.MAX_ANSWER_TOKENS,
         )
 
         for chunk in stream:
-            piece = chunk["message"]["content"]
+            piece = chunk.content
             answer += piece
             yield ("token", piece)
-            if chunk.get("done"):
-                prompt_tokens = chunk.get("prompt_eval_count", 0)
+            if chunk.prompt_tokens:
+                prompt_tokens = chunk.prompt_tokens
 
     # Some locally hosted models replace literal links with citation-shaped
     # placeholders. Preserve verifiability in code: append any source URL the

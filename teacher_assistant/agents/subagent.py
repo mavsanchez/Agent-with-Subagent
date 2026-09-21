@@ -40,9 +40,7 @@ and notice they are the same four steps.
 
 import json
 
-import ollama
-
-from teacher_assistant import settings
+from teacher_assistant import llm, settings
 from teacher_assistant.skills import loader
 
 
@@ -130,8 +128,7 @@ def _build_schema(tools) -> dict:
 
 
 def _decide(system_prompt: str, task: str, schema: dict) -> dict:
-    response = ollama.chat(
-        model=settings.MODEL,
+    response = llm.chat(
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -141,15 +138,13 @@ def _decide(system_prompt: str, task: str, schema: dict) -> dict:
                 'not have it yet; otherwise pick "none" and write the email.',
             },
         ],
-        format=schema,
-        options=settings.chat_options(
-            temperature=settings.TEMPERATURE,
-            num_predict=settings.MAX_DECISION_TOKENS,
-        ),
-        keep_alive=settings.KEEP_ALIVE,
+        response_schema=schema,
+        schema_name="subagent_decision",
+        temperature=settings.TEMPERATURE,
+        max_tokens=settings.MAX_DECISION_TOKENS,
     )
     try:
-        decision = json.loads(response["message"]["content"])
+        decision = json.loads(response.content)
     except json.JSONDecodeError:
         return {"reasoning": "unparseable", "tool": "none", "args": {}}
     if not isinstance(decision.get("args"), dict):
@@ -159,8 +154,7 @@ def _decide(system_prompt: str, task: str, schema: dict) -> dict:
 
 def _repair_args(system_prompt: str, task: str, tool) -> dict:
     """Same repair trick as the parent: re-ask using the tool's OWN schema."""
-    response = ollama.chat(
-        model=settings.MODEL,
+    response = llm.chat(
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -169,15 +163,13 @@ def _repair_args(system_prompt: str, task: str, tool) -> dict:
                 f"calling `{tool.name}`.",
             },
         ],
-        format=tool.input_schema,
-        options=settings.chat_options(
-            temperature=settings.TEMPERATURE,
-            num_predict=settings.MAX_DECISION_TOKENS,
-        ),
-        keep_alive=settings.KEEP_ALIVE,
+        response_schema=tool.input_schema,
+        schema_name=f"{tool.name}_arguments",
+        temperature=settings.TEMPERATURE,
+        max_tokens=settings.MAX_DECISION_TOKENS,
     )
     try:
-        return json.loads(response["message"]["content"])
+        return json.loads(response.content)
     except json.JSONDecodeError:
         return {}
 
@@ -328,8 +320,7 @@ def run(mcp, spec: dict, task: str, briefing: list[str]):
     system_prompt = _build_system_prompt(
         spec, skill_body, briefing, observations, include_tools=False,
     )
-    stream = ollama.chat(
-        model=settings.MODEL,
+    stream = llm.stream_chat(
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -338,18 +329,16 @@ def run(mcp, spec: dict, task: str, briefing: list[str]):
                 "the email and nothing else.",
             },
         ],
-        stream=True,
-        options=settings.chat_options(num_predict=settings.MAX_ANSWER_TOKENS),
-        keep_alive=settings.KEEP_ALIVE,
+        max_tokens=settings.MAX_ANSWER_TOKENS,
     )
     output = ""
     for chunk in stream:
-        piece = chunk["message"]["content"]
+        piece = chunk.content
         output += piece
         if piece:
             yield ("token", piece)
-        if chunk.get("done"):
-            panel["prompt_tokens"] = chunk.get("prompt_eval_count", 0)
+        if chunk.prompt_tokens:
+            panel["prompt_tokens"] = chunk.prompt_tokens
     output = output.strip()
 
     panel["result"] = output

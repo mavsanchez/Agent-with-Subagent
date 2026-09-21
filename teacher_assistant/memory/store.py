@@ -17,10 +17,7 @@ keyword-vs-semantic comparison lives.
 
 import json
 
-import numpy as np
-import ollama
-
-from teacher_assistant import settings
+from teacher_assistant import llm, settings
 
 MEMORY_PATH = settings.MEMORY_PATH
 
@@ -31,7 +28,16 @@ MEMORY_PATH = settings.MEMORY_PATH
 def load() -> list[dict]:
     if not MEMORY_PATH.exists():
         return []
-    return json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+    records = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+    # Older versions persisted model-specific vectors. LiteLLM chat-based
+    # semantic scoring needs only the durable fact data.
+    return [
+        {"id": record["id"], "text": record["text"]}
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("id"), int)
+        and isinstance(record.get("text"), str)
+    ]
 
 
 def save(memories: list[dict]) -> None:
@@ -43,82 +49,55 @@ def wipe() -> None:
 
 
 # ---------------------------------------------------------------------------
-# EMBEDDINGS — turning text into a vector of numbers
+# SEMANTIC SCORING — comparing meaning through the chat model
 # ---------------------------------------------------------------------------
-# Two sentences that MEAN the same thing end up close together in vector space,
-# even with zero words in common. That's how "anything to keep in mind for the
-# final?" can find "Priya has an extended-time accommodation for exams".
-def embed(text: str) -> list[float]:
-    response = ollama.embed(
-        model=settings.EMBED_MODEL,
-        input=text,
-        keep_alive=settings.KEEP_ALIVE,
+# The `agent` alias can judge sentences as related even with no words in common.
+# This keeps semantic memory on DGX without requiring `/v1/embeddings`.
+SEMANTIC_RETRIEVAL_PROMPT = """Select saved memories that are relevant to
+answering the query. Judge meaning and topic, not shared words. Return at most
+the requested number of IDs, most useful first. Return an empty list when none
+are relevant. Output the JSON decision immediately."""
+
+
+def _semantic_relevant_ids(query: str, memories: list[dict]) -> list[int]:
+    """Use the configured chat model to select semantically relevant facts."""
+    ids = [memory["id"] for memory in memories]
+    schema = {
+        "type": "object",
+        "properties": {
+            "relevant_ids": {
+                "type": "array",
+                "items": {"type": "integer", "enum": ids},
+                "maxItems": settings.RETRIEVAL_TOP_K,
+            }
+        },
+        "required": ["relevant_ids"],
+    }
+    candidates = "\n".join(
+        f"{memory['id']}: {memory['text']}" for memory in memories
     )
-    return response["embeddings"][0]
-
-
-def cosine(a, b) -> float:
-    """Similarity between two vectors: 1.0 = identical, 0.0 = unrelated."""
-    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    # Embedding models do not all produce vectors of the same size.  A model
-    # change must not take down the whole chat if an old record is still on
-    # disk; migration is handled by _ensure_compatible_embeddings below.
-    if a.ndim != 1 or b.ndim != 1 or a.shape != b.shape:
-        return 0.0
-    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
-
-
-def _embedding_size(embedding) -> int | None:
-    """Return a valid embedding's dimension, or None for bad stored data."""
+    response = llm.chat(
+        messages=[
+            {"role": "system", "content": SEMANTIC_RETRIEVAL_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Return at most {settings.RETRIEVAL_TOP_K} IDs.\n"
+                    f"QUERY: {query}\n\nMEMORIES:\n{candidates}"
+                ),
+            },
+        ],
+        response_schema=schema,
+        schema_name="relevant_memories",
+        temperature=0,
+        max_tokens=settings.MAX_DECISION_TOKENS,
+    )
     try:
-        vector = np.asarray(embedding, dtype=float)
-    except (TypeError, ValueError):
-        return None
-    if vector.ndim != 1 or vector.size == 0:
-        return None
-    return int(vector.size)
-
-
-def _ensure_compatible_embeddings(
-    memories: list[dict], expected_size: int
-) -> list[dict]:
-    """Re-embed records created by a different or incompatible model.
-
-    Embeddings are persisted alongside the text, so changing EMBED_MODEL can
-    leave records from the previous model in memories.json.  Re-embedding the
-    text preserves those memories and makes the migration a one-time cost.
-    """
-    compatible = []
-    changed = False
-
-    for memory in memories:
-        if not isinstance(memory, dict) or not isinstance(memory.get("text"), str):
-            continue
-
-        model_changed = (
-            memory.get("embedding_model") is not None
-            and memory.get("embedding_model") != settings.EMBED_MODEL
-        )
-        size_changed = _embedding_size(memory.get("embedding")) != expected_size
-
-        if model_changed or size_changed:
-            vector = embed(memory["text"])
-            actual_size = _embedding_size(vector)
-            if actual_size != expected_size:
-                raise RuntimeError(
-                    f"Embedding model '{settings.EMBED_MODEL}' returned {actual_size} "
-                    f"dimensions; expected {expected_size}."
-                )
-            memory["embedding"] = vector
-            memory["embedding_model"] = settings.EMBED_MODEL
-            changed = True
-
-        if _embedding_size(memory.get("embedding")) == expected_size:
-            compatible.append(memory)
-
-    if changed:
-        save(memories)
-    return compatible
+        selected = json.loads(response.content).get("relevant_ids", [])
+    except json.JSONDecodeError:
+        return []
+    valid_ids = set(ids)
+    return [item for item in selected if item in valid_ids][: settings.RETRIEVAL_TOP_K]
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +182,7 @@ def _is_explicit_request(user_msg: str) -> bool:
     return any(t in user_msg.lower() for t in triggers)
 
 # ---- MODIFY HERE ----
-# Ollama's `format` parameter takes a JSON Schema and CONSTRAINS DECODING: the
+# LiteLLM's OpenAI-compatible JSON-schema response format constrains decoding: the
 # model is physically incapable of producing text that doesn't match. This is
 # how we get reliable structured output from a 4B model that was never trained
 # for function calling. No regex, no "please respond with valid JSON", no retry
@@ -255,18 +234,18 @@ def extract_facts(user_msg: str, assistant_msg: str = "") -> list[str]:
             "\n\nThe user is explicitly asking you to remember something. Extract it."
         )
 
-    response = ollama.chat(
-        model=settings.MODEL,
+    response = llm.chat(
         messages=[
             {"role": "system", "content": EXTRACT_PROMPT},
             {"role": "user", "content": exchange},
         ],
-        format=_EXTRACT_SCHEMA,
-        options=settings.chat_options(temperature=0, num_predict=200),
-        keep_alive=settings.KEEP_ALIVE,
+        response_schema=_EXTRACT_SCHEMA,
+        schema_name="memory_facts",
+        temperature=0,
+        max_tokens=settings.MAX_DECISION_TOKENS,
     )
     try:
-        facts = json.loads(response["message"]["content"]).get("facts", [])
+        facts = json.loads(response.content).get("facts", [])
     except json.JSONDecodeError:
         return []
 
@@ -342,18 +321,18 @@ _RECONCILE_SCHEMA = {
 
 
 def _reconcile(new_fact: str, existing_fact: str) -> tuple[str, str]:
-    response = ollama.chat(
-        model=settings.MODEL,
+    response = llm.chat(
         messages=[
             {"role": "system", "content": RECONCILE_PROMPT},
             {"role": "user", "content": f"EXISTING: {existing_fact}\nNEW: {new_fact}"},
         ],
-        format=_RECONCILE_SCHEMA,
-        options=settings.chat_options(temperature=0, num_predict=200),
-        keep_alive=settings.KEEP_ALIVE,
+        response_schema=_RECONCILE_SCHEMA,
+        schema_name="memory_reconciliation",
+        temperature=0,
+        max_tokens=settings.MAX_DECISION_TOKENS,
     )
     try:
-        result = json.loads(response["message"]["content"])
+        result = json.loads(response.content)
         return result["action"], result.get("reason", "")
     except (json.JSONDecodeError, KeyError):
         return "add", "could not parse decision, defaulting to add"
@@ -365,42 +344,24 @@ def remember(fact: str) -> str:
     Returns a human-readable description of what happened, for the trace panel.
     """
     memories = load()
-    vector = embed(fact)
-    vector_size = _embedding_size(vector)
-    if vector_size is None:
-        raise RuntimeError(
-            f"Embedding model '{settings.EMBED_MODEL}' returned an invalid vector."
-        )
-    compatible_memories = _ensure_compatible_embeddings(memories, vector_size)
-
-    # Find the most similar thing we already believe.
-    best, best_score = None, 0.0
-    for m in compatible_memories:
-        score = cosine(vector, m["embedding"])
-        if score > best_score:
-            best, best_score = m, score
-
-    # Similar enough to be suspicious? Ask the model what to do.
-    if best is not None and best_score >= settings.SIMILARITY_THRESHOLD:
-        action, reason = _reconcile(fact, best["text"])
+    # Ask whether each existing fact is the same topic. The reconciliation
+    # schema can distinguish a replacement/duplicate from an unrelated fact.
+    for existing in memories:
+        action, reason = _reconcile(fact, existing["text"])
 
         if action == "skip":
-            return f"SKIP (already knew it, sim={best_score:.2f}) - {fact}"
+            return f"SKIP (already knew it) - {fact}"
 
         if action == "update":
-            best["text"] = fact
-            best["embedding"] = vector
-            best["embedding_model"] = settings.EMBED_MODEL
+            existing["text"] = fact
             save(memories)
-            return f"UPDATE #{best['id']} (sim={best_score:.2f}) - {fact}"
+            return f"UPDATE #{existing['id']} - {fact}"
 
     next_id = max((m["id"] for m in memories), default=0) + 1
     memories.append(
         {
             "id": next_id,
             "text": fact,
-            "embedding": vector,
-            "embedding_model": settings.EMBED_MODEL,
         }
     )
     save(memories)
@@ -411,7 +372,7 @@ def remember(fact: str) -> str:
 # 3. RETRIEVE — get the relevant facts back
 # ---------------------------------------------------------------------------
 # Two strategies, switchable from the GUI. Run the SAME question through both.
-# That side-by-side is the fastest way to explain why embeddings exist.
+# That side-by-side is the fastest way to compare literal and semantic search.
 def retrieve(query: str, mode: str = "semantic") -> list[dict]:
     memories = load()
     if not memories:
@@ -430,22 +391,8 @@ def retrieve(query: str, mode: str = "semantic") -> list[dict]:
         hits.sort(key=lambda pair: pair[0], reverse=True)
         return [m for _, m in hits[: settings.RETRIEVAL_TOP_K]]
 
-    # Semantic: compare MEANING. Finds "vegetarian" from "what should I eat?"
-    query_vector = embed(query)
-    query_size = _embedding_size(query_vector)
-    if query_size is None:
-        raise RuntimeError(
-            f"Embedding model '{settings.EMBED_MODEL}' returned an invalid vector."
-        )
-    memories = _ensure_compatible_embeddings(memories, query_size)
-    scored = [(cosine(query_vector, m["embedding"]), m) for m in memories]
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-
-    # ---- MODIFY HERE ----
-    # A relevance floor. Too high and nothing is recalled; too low and every
-    # question drags in irrelevant facts. Try 0.0 to see the failure mode.
-    return [
-        m
-        for score, m in scored[: settings.RETRIEVAL_TOP_K]
-        if score > settings.RETRIEVAL_MIN_SCORE
-    ]
+    # Semantic: ask the configured DGX chat model to compare meaning. This finds
+    # "vegetarian" from "what should I eat?" without an embeddings endpoint.
+    selected_ids = _semantic_relevant_ids(query, memories)
+    by_id = {memory["id"]: memory for memory in memories}
+    return [by_id[memory_id] for memory_id in selected_ids]

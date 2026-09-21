@@ -22,9 +22,8 @@ context window limit with your own eyes.
 """
 
 import gradio as gr
-import ollama
 
-from teacher_assistant import settings
+from teacher_assistant import llm, settings
 from teacher_assistant.agents import subagent
 from teacher_assistant.agents.main import run_turn
 from teacher_assistant.mcp.client import MCPClient
@@ -42,31 +41,15 @@ print(f"  tools available: {[t.name for t in MCP.tools]}")
 
 
 def _warm_up():
-    """Load both models before the UI opens so the first turn stays responsive."""
+    """Verify the configured LiteLLM route before the UI opens."""
     try:
-        ollama.embed(
-            model=settings.EMBED_MODEL,
-            input="hi",
-            options=settings.chat_options(),
-            keep_alive=settings.KEEP_ALIVE,
+        llm.check_connection()
+        print(
+            f"  LiteLLM ready at {settings.LLM_BASE_URL} "
+            f"(model alias '{settings.LLM_MODEL}')."
         )
-        print(f"  {settings.EMBED_MODEL} warmed up and resident.")
     except Exception as e:
-        print(f"  WARNING: could not warm {settings.EMBED_MODEL} ({e}).")
-
-    try:
-        ollama.chat(
-            model=settings.MODEL,
-            messages=[{"role": "user", "content": "hi"}],
-            options=settings.chat_options(
-                temperature=settings.TEMPERATURE,
-                num_predict=1,
-            ),
-            keep_alive=settings.KEEP_ALIVE,
-        )
-        print(f"  {settings.MODEL} warmed up and resident.")
-    except Exception as e:
-        print(f"  WARNING: could not reach Ollama ({e}). Run `ollama serve`.")
+        print(f"  WARNING: could not reach the configured LLM ({e}).")
 
 
 _warm_up()
@@ -251,8 +234,9 @@ def on_send(user_text, chat, messages, retrieval_mode, use_subagent):
 
     chat = chat + [
         {"role": "user", "content": user_text},
-        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "_Thinking on DGX…_"},
     ]
+    answer_started = False
     trace_lines = []
 
     # Paint the submitted message before retrieval or any model call starts.
@@ -269,7 +253,28 @@ def on_send(user_text, chat, messages, retrieval_mode, use_subagent):
     )
 
     # run_turn is a generator; each event updates a different part of the UI.
-    for kind, payload in run_turn(MCP, messages, user_text, retrieval_mode, use_subagent):
+    # Advance it explicitly so connection/API errors become a useful chat and
+    # Trace message instead of an opaque Gradio callback failure.
+    events = run_turn(MCP, messages, user_text, retrieval_mode, use_subagent)
+    while True:
+        try:
+            kind, payload = next(events)
+        except StopIteration:
+            break
+        except Exception as exc:
+            failure = f"Unable to complete the request. {exc}"
+            if answer_started:
+                chat[-1]["content"] += f"\n\n{failure}"
+            else:
+                chat[-1]["content"] = failure
+            trace_lines.append(f"**Request failed** — {exc}")
+            yield (
+                gr.skip(), chat, gr.skip(),
+                "### Trace\n" + "\n\n".join(trace_lines),
+                gr.skip(), gr.skip(), "**Request failed**", gr.skip(),
+            )
+            return
+
         if kind == "trace":
             trace_lines.append(payload)
             yield (
@@ -295,6 +300,9 @@ def on_send(user_text, chat, messages, retrieval_mode, use_subagent):
                 gr.skip(), gr.skip(), gr.skip(), render_subagent(_LAST_SUBAGENT),
             )
         elif kind == "token":
+            if not answer_started:
+                chat[-1]["content"] = ""
+                answer_started = True
             chat[-1]["content"] += payload
             yield (
                 gr.skip(), chat, gr.skip(), gr.skip(),
@@ -350,7 +358,7 @@ def fill_context(messages):
 # ---------------------------------------------------------------------------
 with gr.Blocks(title="Local Agent Demo") as demo:
     gr.Markdown(
-        f"# Teacher's Assistant — Local Agent Demo &nbsp;·&nbsp; `{settings.MODEL}`\n"
+        f"# Teacher's Assistant — Local Agent Demo &nbsp;·&nbsp; `{settings.LLM_MODEL}`\n"
         "An agent for a professor: gradebook tools over **MCP** · **short-term** vs "
         "**long-term** memory · **skills** with progressive disclosure · a "
         "**subagent** it delegates whole jobs to · key-free **web research** "
@@ -364,7 +372,7 @@ with gr.Blocks(title="Local Agent Demo") as demo:
         # ---------------- LEFT: chat ----------------
         with gr.Column(scale=5):
             # Gradio 6 chat messages are {"role": ..., "content": ...} dicts --
-            # the same shape the Ollama API uses, so no conversion needed.
+            # the same chat-message shape our agent loop uses, so no conversion needed.
             chatbot = gr.Chatbot(height=460, show_label=False)
             with gr.Row():
                 msg_box = gr.Textbox(

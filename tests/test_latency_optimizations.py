@@ -6,12 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import mcp as external_mcp
 
 from teacher_assistant import mcp as local_mcp
-from teacher_assistant import settings
+from teacher_assistant import llm, settings
 from teacher_assistant.agents import main as agent
 from teacher_assistant.mcp import client as mcp_client
 from teacher_assistant.mcp import course_server
@@ -97,16 +97,12 @@ def stream_chunks(text, prompt_tokens=123):
     pieces = (text[:midpoint], text[midpoint:])
     return iter(
         [
-            {"message": {"content": piece}, "done": False}
+            llm.StreamChunk(content=piece)
             for piece in pieces
             if piece
         ]
         + [
-            {
-                "message": {"content": ""},
-                "done": True,
-                "prompt_eval_count": prompt_tokens,
-            }
+            llm.StreamChunk(prompt_tokens=prompt_tokens)
         ]
     )
 
@@ -118,16 +114,17 @@ class ChatScript:
         self.specialist_answer = specialist_answer
         self.calls = []
 
-    def __call__(self, **kwargs):
+    def chat(self, **kwargs):
         self.calls.append(kwargs)
-        if kwargs.get("stream"):
-            user_prompt = kwargs["messages"][-1]["content"]
-            if "Write the email now" in user_prompt:
-                return stream_chunks(self.specialist_answer)
-            return stream_chunks(self.parent_answer)
-
         decision = self.decisions.pop(0)
-        return {"message": {"content": json.dumps(decision)}}
+        return llm.ChatResult(content=json.dumps(decision))
+
+    def stream_chat(self, **kwargs):
+        self.calls.append({**kwargs, "stream": True})
+        user_prompt = kwargs["messages"][-1]["content"]
+        if "Write the email now" in user_prompt:
+            return stream_chunks(self.specialist_answer)
+        return stream_chunks(self.parent_answer)
 
 
 class AgentCallCountTests(unittest.TestCase):
@@ -135,7 +132,8 @@ class AgentCallCountTests(unittest.TestCase):
         mcp = FakeMCP()
         messages = []
         with (
-            patch("ollama.chat", side_effect=chat_script),
+            patch.object(llm, "chat", side_effect=chat_script.chat),
+            patch.object(llm, "stream_chat", side_effect=chat_script.stream_chat),
             patch.object(agent.store, "retrieve", return_value=[]),
             patch.object(agent.store, "extract_facts", return_value=[]),
         ):
@@ -150,14 +148,6 @@ class AgentCallCountTests(unittest.TestCase):
             )
         return mcp, events
 
-    def assert_shared_context(self, calls):
-        self.assertTrue(calls)
-        for call in calls:
-            self.assertEqual(
-                call["options"]["num_ctx"],
-                settings.MODEL_CONTEXT_TOKENS,
-            )
-
     def test_no_tool_uses_one_route_and_one_answer_call(self):
         script = ChatScript(
             [{"reasoning": "No lookup is needed.", "tool": "none", "args": {}}],
@@ -170,7 +160,7 @@ class AgentCallCountTests(unittest.TestCase):
         self.assertFalse(script.calls[0].get("stream", False))
         self.assertTrue(script.calls[1]["stream"])
         self.assertEqual(
-            script.calls[1]["options"]["num_predict"],
+            script.calls[1]["max_tokens"],
             settings.MAX_ANSWER_TOKENS,
         )
         self.assertNotIn(
@@ -181,7 +171,6 @@ class AgentCallCountTests(unittest.TestCase):
             script.calls[1]["messages"][0]["content"],
             agent.PERSONA,
         )
-        self.assert_shared_context(script.calls)
         self.assertEqual(mcp.calls, [])
         self.assertEqual(events[-1][0], "done")
         self.assertEqual(events[-1][1][-1]["content"], "Hello. How can I help?")
@@ -206,7 +195,6 @@ class AgentCallCountTests(unittest.TestCase):
             mcp.calls,
             [("student_report", {"student": "Marcus Webb"})],
         )
-        self.assert_shared_context(script.calls)
         self.assertIn(
             agent.ANSWER_INSTRUCTION,
             script.calls[-1]["messages"][0]["content"],
@@ -296,7 +284,6 @@ class AgentCallCountTests(unittest.TestCase):
             mcp.calls,
             [("student_report", {"student": "Marcus Webb"})],
         )
-        self.assert_shared_context(script.calls)
         self.assertEqual(events[-1][1][-1]["content"], email)
         streamed = "".join(payload for kind, payload in events if kind == "token")
         self.assertEqual(streamed, email)
@@ -338,13 +325,11 @@ class AgentCallCountTests(unittest.TestCase):
 
 
 class ConfigurationAndMemoryTests(unittest.TestCase):
-    def test_chat_options_are_bounded_and_fresh(self):
-        first = settings.chat_options(temperature=0)
-        second = settings.chat_options(num_predict=12)
-
-        first["num_ctx"] = 1
-        self.assertEqual(second["num_ctx"], settings.MODEL_CONTEXT_TOKENS)
-        self.assertEqual(second["num_predict"], 12)
+    def test_litellm_defaults_are_configurable(self):
+        self.assertEqual(settings.LLM_BASE_URL, os.getenv(
+            "LLM_BASE_URL", "http://dgx-ramona:4000/v1"
+        ).rstrip("/"))
+        self.assertEqual(settings.LLM_MODEL, os.getenv("LLM_MODEL", "agent"))
 
     def test_web_research_arguments_are_bounded(self):
         oversized = " ".join(f"word{i}" for i in range(100))
@@ -357,30 +342,101 @@ class ConfigurationAndMemoryTests(unittest.TestCase):
         self.assertLessEqual(len(args["query"].split()), 50)
         self.assertEqual(args["limit"], settings.WEB_SEARCH_RESULT_COUNT)
 
-    def test_semantic_retrieval_applies_the_quality_floor(self):
+    def test_semantic_retrieval_uses_model_selected_ids(self):
         records = [
-            {"id": 1, "text": "relevant", "embedding": [1.0, 0.0]},
-            {"id": 2, "text": "unrelated", "embedding": [0.49, 0.871722]},
+            {"id": 1, "text": "relevant"},
+            {"id": 2, "text": "unrelated"},
         ]
         with (
             patch.object(memory, "load", return_value=records),
-            patch.object(memory, "embed", return_value=[1.0, 0.0]),
-            patch.object(memory, "_ensure_compatible_embeddings", return_value=records),
+            patch.object(
+                memory,
+                "_semantic_relevant_ids",
+                return_value=[1],
+            ),
         ):
             recalled = memory.retrieve("query", mode="semantic")
 
         self.assertEqual([item["text"] for item in recalled], ["relevant"])
 
     def test_explicit_remember_question_still_runs_fact_extraction(self):
-        response = {"message": {"content": json.dumps({"facts": ["Marcus needs extra time."]})}}
-        with patch("ollama.chat", return_value=response) as chat:
+        response = llm.ChatResult(
+            content=json.dumps({"facts": ["Marcus needs extra time."]})
+        )
+        with patch.object(llm, "chat", return_value=response) as chat:
             facts = memory.extract_facts("Remember that Marcus needs extra time?")
 
         self.assertEqual(facts, ["Marcus needs extra time."])
         self.assertEqual(
-            chat.call_args.kwargs["options"]["num_ctx"],
-            settings.MODEL_CONTEXT_TOKENS,
+            chat.call_args.kwargs["max_tokens"],
+            settings.MAX_DECISION_TOKENS,
         )
+
+
+class OpenAIClientTests(unittest.TestCase):
+    def test_chat_uses_configured_model_and_json_schema(self):
+        completion = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))],
+            usage=SimpleNamespace(prompt_tokens=7),
+        )
+        create = MagicMock(return_value=completion)
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+
+        with patch.object(llm, "client", return_value=fake_client):
+            result = llm.chat(
+                [{"role": "user", "content": "test"}],
+                max_tokens=20,
+                response_schema={"type": "object"},
+                schema_name="test response",
+            )
+
+        self.assertEqual(result.content, '{"ok": true}')
+        self.assertEqual(result.prompt_tokens, 7)
+        request = create.call_args.kwargs
+        self.assertEqual(request["model"], settings.LLM_MODEL)
+        self.assertEqual(request["max_tokens"], 20)
+        self.assertEqual(request["response_format"]["type"], "json_schema")
+
+    def test_api_error_names_configured_endpoint(self):
+        create = MagicMock(side_effect=ConnectionError("connection refused"))
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+
+        with patch.object(llm, "client", return_value=fake_client):
+            with self.assertRaisesRegex(RuntimeError, settings.LLM_BASE_URL):
+                llm.chat([{"role": "user", "content": "test"}], max_tokens=1)
+
+    def test_stream_filters_reasoning_only_deltas(self):
+        reasoning_only = SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=None))],
+            usage=None,
+        )
+        visible = SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="Hello"))],
+            usage=None,
+        )
+        usage = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(prompt_tokens=9),
+        )
+        create = MagicMock(return_value=iter([reasoning_only, visible, usage]))
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+
+        with patch.object(llm, "client", return_value=fake_client):
+            chunks = list(
+                llm.stream_chat(
+                    [{"role": "user", "content": "test"}],
+                    max_tokens=20,
+                )
+            )
+
+        self.assertEqual([chunk.content for chunk in chunks], ["Hello", ""])
+        self.assertEqual(chunks[-1].prompt_tokens, 9)
 
 
 class WebResearchClientTests(unittest.TestCase):
@@ -541,8 +597,8 @@ class AppStreamingTests(unittest.TestCase):
         sys.modules.pop("app", None)
         with (
             patch.object(mcp_client, "MCPClient", FakeMCPClient),
-            patch("ollama.embed", return_value={"embeddings": [[0.0]]}),
-            patch("ollama.chat", return_value={"message": {"content": ""}}),
+            patch.object(llm, "check_connection"),
+            patch.object(llm, "chat", return_value=llm.ChatResult(content="")),
         ):
             cls.app = importlib.import_module("app")
 
@@ -579,7 +635,7 @@ class AppStreamingTests(unittest.TestCase):
             self.assertEqual(entered_run_turn, [])
             self.assertEqual(initial[0], "")
             self.assertEqual(initial[1][-2]["content"], "Hello")
-            self.assertEqual(initial[1][-1]["content"], "")
+            self.assertEqual(initial[1][-1]["content"], "_Thinking on DGX…_")
             self.assertIn("Working", initial[6])
 
             token = next(output)
@@ -602,6 +658,23 @@ class AppStreamingTests(unittest.TestCase):
             self.assertEqual(done[5], "memory")
             context.assert_called_once()
             memory.assert_called_once()
+
+    def test_llm_failure_is_rendered_in_chat_with_endpoint(self):
+        endpoint_error = RuntimeError(
+            f"LLM request to {settings.LLM_BASE_URL} failed: connection refused"
+        )
+
+        def failing_run_turn(*_args, **_kwargs):
+            raise endpoint_error
+            yield
+
+        with patch.object(self.app, "run_turn", failing_run_turn):
+            output = self.app.on_send("Hello", [], [], "semantic", True)
+            next(output)
+            failure = next(output)
+
+        self.assertIn(settings.LLM_BASE_URL, failure[1][-1]["content"])
+        self.assertIn("Request failed", failure[3])
 
 
 if __name__ == "__main__":

@@ -39,66 +39,49 @@ def _packages():
     missing = [
         name
         for name in (
-            "ollama", "mcp", "gradio", "numpy", "matplotlib", "requests", "bs4",
+            "openai", "mcp", "gradio", "matplotlib", "requests", "bs4",
         )
         if importlib.util.find_spec(name) is None
     ]
     if missing:
         raise RuntimeError("missing: " + ", ".join(missing))
-    return "ollama, mcp, gradio, numpy, matplotlib, requests, beautifulsoup4"
+    return "openai, mcp, gradio, matplotlib, requests, beautifulsoup4"
 
 
 have_packages = check("Python packages", _packages, "uv sync")
 
 
-# --- 2. is the Ollama server running? --------------------------------------
-# We check by talking to it, not by looking for the binary on PATH -- on
-# Windows the app is often running fine while `ollama` isn't on PATH.
-installed_models = []
+# --- 2. is LiteLLM configured and reachable? ------------------------------
+def _llm_environment():
+    if not settings.LLM_API_KEY:
+        raise RuntimeError("LLM_API_KEY is not set")
+    return f"{settings.LLM_BASE_URL}, model alias '{settings.LLM_MODEL}'"
 
 
-def _ollama_server():
-    global installed_models
-    import ollama
+configured = check(
+    "LLM environment",
+    _llm_environment,
+    "Set LLM_BASE_URL, LLM_MODEL, and LLM_API_KEY (see .env.example)",
+)
 
-    installed_models = [m.model for m in ollama.list().models]
-    return f"reachable, {len(installed_models)} model(s) installed"
+
+def _litellm_server():
+    from teacher_assistant import llm
+
+    llm.check_connection()
+    return f"reachable at {settings.LLM_BASE_URL}"
 
 
 server_up = False
-if have_packages:
+if have_packages and configured:
     server_up = check(
-        "Ollama server",
-        _ollama_server,
-        "Start Ollama (install from https://ollama.com/download), then: ollama serve",
+        "LiteLLM chat route",
+        _litellm_server,
+        f"Check LiteLLM, DNS/network access, and credentials for {settings.LLM_BASE_URL}",
     )
 
 
-# --- 3. are the models pulled? ---------------------------------------------
-def _model_present(name):
-    def inner():
-        # `ollama list` reports "gemma3:4b"; a user may have configured "gemma3".
-        if not any(m == name or m.split(":")[0] == name.split(":")[0] for m in installed_models):
-            raise RuntimeError("not pulled")
-        return None
-
-    return inner
-
-
-if server_up:
-    check(
-        f"Model '{settings.MODEL}'",
-        _model_present(settings.MODEL),
-        f"ollama pull {settings.MODEL}",
-    )
-    check(
-        f"Embeddings '{settings.EMBED_MODEL}'",
-        _model_present(settings.EMBED_MODEL),
-        f"ollama pull {settings.EMBED_MODEL}",
-    )
-
-
-# --- 4. does MCP start and does the client expose all capabilities? --------
+# --- 3. does MCP start and does the client expose all capabilities? --------
 def _mcp_server():
     from teacher_assistant.mcp.client import MCPClient
 
